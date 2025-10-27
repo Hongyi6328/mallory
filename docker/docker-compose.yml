@@ -1,0 +1,245 @@
+version: '3.7'
+x-node:
+  &default-node
+  image: jepsen_node
+  env_file: ./secret/node.env
+  secrets:
+    - authorized_keys
+  tty: true
+  tmpfs:
+    - /run:size=100M
+    - /run/lock:size=100M
+  # https://serverfault.com/questions/1053187/systemd-fails-to-run-in-a-docker-container-when-using-cgroupv2-cgroupns-priva
+  # cgroup_parent: docker.slice
+  volumes:
+    - "jepsen-shared:/var/jepsen/shared"
+    - "/jepsen:/host"
+  # The lines below are to allow FUSE to work in the container
+    - "/lib/modules:/lib/modules"
+  devices:
+    - "/dev/fuse"
+  security_opt:
+      - apparmor:unconfined
+      - seccomp=unconfined  # lets GDB disable address space randomization
+  networks:
+    - jepsen
+  privileged: true
+  cap_add:
+    - ALL
+  ports:
+    - ${JEPSEN_PORT:-22}
+
+volumes:
+  jepsen-shared:
+
+secrets:
+  authorized_keys:
+    file: ./secret/authorized_keys
+
+networks:
+  # This allows all traffic (to central & Internet, but NOT between nodes)
+  # primarily used for sending out-of-band information to the central node
+  # we set this up via an iptables rule to DROP all traffic on this subnet
+  # except traffic to/from the gateway and to/from the central node
+
+  # NOTE: This is disabled because it does not interoperate well with DNS.
+  # Many systems use DNS to resolve other nodes' addresses and get the
+  # unreachable IP rather than the reachable one.
+  
+  # sidenet:
+  #   ipam:
+  #     config:
+  #       - subnet: 172.16.0.0/24
+  #         gateway: 172.16.0.1
+
+  # networks used for experiments
+  net1:
+    ipam:
+      config:
+        - subnet: 10.1.1.0/24
+          gateway: 10.1.1.1
+  net2:
+    ipam:
+      config:
+        - subnet: 10.1.2.0/24
+          gateway: 10.1.2.1
+  net3:
+    ipam:
+      config:
+        - subnet: 10.1.3.0/24
+          gateway: 10.1.3.1
+  net4:
+    ipam:
+      config:
+        - subnet: 10.1.4.0/24
+          gateway: 10.1.4.1
+  net5:
+    ipam:
+      config:
+        - subnet: 10.1.5.0/24
+          gateway: 10.1.5.1
+
+
+services:
+  # This is a hack to only build the node image once, rather than for every node
+  # https://stackoverflow.com/a/68801955
+  _build_node_image:
+    image: jepsen_node
+    build: ./node
+    # Make sure docker-compose doesn't try to start this
+    # https://stackoverflow.com/questions/37254881/is-there-any-way-to-disable-a-service-in-docker-compose-yml
+    scale: 0
+
+  control:
+    container_name: jepsen-control
+    hostname: control
+    depends_on:
+      - n5
+
+    build: ./control
+    image: jepsen_control
+    env_file: ./secret/control.env
+    privileged: true
+    ports:
+      - "22"
+      - "8080:8080"
+      - "5000:5000"
+    dns:
+      - "172.18.177.130"
+      - "127.0.0.1" # Control runs its own DNS server, which the Docker DNS server (127.0.0.11) queries!
+    networks:
+      # sidenet:
+      #   ipv4_address: "172.16.0.2"    
+      net1:
+        ipv4_address: "10.1.1.2"
+      net2:
+        ipv4_address: "10.1.2.2"
+      net3:
+        ipv4_address: "10.1.3.2"
+      net4:
+        ipv4_address: "10.1.4.2"
+      net5:
+        ipv4_address: "10.1.5.2"
+
+    volumes:
+      - "jepsen-shared:/var/jepsen/shared"
+      - "/jepsen:/host"
+    extra_hosts:
+    #   - "control:172.16.0.2"
+      - "n1:10.1.1.3"
+      - "n2:10.1.2.3"
+      - "n3:10.1.3.3"
+      - "n4:10.1.4.3"
+      - "n5:10.1.5.3"
+
+  n1:
+    << : *default-node
+    container_name: jepsen-n1
+    hostname: n1
+    depends_on:
+      - _build_node_image
+      
+    dns:
+      - "10.1.1.2" # we use the DNS server on the control
+    networks:
+      net1:
+        ipv4_address: "10.1.1.3"
+      # sidenet:
+      #   ipv4_address: "172.16.0.3"
+    extra_hosts:
+      - "control:10.1.1.2"
+#      - "control:172.16.0.2"
+      - "n1:10.1.1.3"
+      - "n2:10.1.2.3"
+      - "n3:10.1.3.3"
+      - "n4:10.1.4.3"
+      - "n5:10.1.5.3"
+  n2:
+    << : *default-node
+    container_name: jepsen-n2
+    hostname: n2
+    depends_on:
+      - _build_node_image
+      - n1
+    dns:
+      - "10.1.2.2" # we use the DNS server on the control
+    networks:
+      net2:
+        ipv4_address: "10.1.2.3"
+      # sidenet:
+      #   ipv4_address: "172.16.0.4"
+    extra_hosts:
+      - "control:10.1.2.2"
+#      - "control:172.16.0.2"
+      - "n1:10.1.1.3"
+      - "n2:10.1.2.3"
+      - "n3:10.1.3.3"
+      - "n4:10.1.4.3"
+      - "n5:10.1.5.3"
+  n3:
+    << : *default-node
+    container_name: jepsen-n3
+    hostname: n3
+    depends_on:
+      - _build_node_image
+      - n2
+    dns:
+      - "10.1.3.2" # we use the DNS server on the control
+    networks:
+      net3:
+        ipv4_address: "10.1.3.3"
+      # sidenet:
+      #   ipv4_address: "172.16.0.5"
+    extra_hosts:
+      - "control:10.1.3.2"
+#      - "control:172.16.0.2"
+      - "n1:10.1.1.3"
+      - "n2:10.1.2.3"
+      - "n3:10.1.3.3"
+      - "n4:10.1.4.3"
+      - "n5:10.1.5.3"
+  n4:
+    << : *default-node
+    container_name: jepsen-n4
+    hostname: n4
+    depends_on:
+      - _build_node_image
+      - n3
+    dns:
+      - "10.1.4.2" # we use the DNS server on the control
+    networks:
+      net4:
+        ipv4_address: "10.1.4.3"
+      # sidenet:
+      #   ipv4_address: "172.16.0.6"
+    extra_hosts:
+      - "control:10.1.4.2"
+#      - "control:172.16.0.2"
+      - "n1:10.1.1.3"
+      - "n2:10.1.2.3"
+      - "n3:10.1.3.3"
+      - "n4:10.1.4.3"
+      - "n5:10.1.5.3"
+  n5:
+    << : *default-node
+    container_name: jepsen-n5
+    hostname: n5
+    depends_on:
+      - _build_node_image
+      - n4
+    dns:
+      - "10.1.5.2" # we use the DNS server on the control
+    networks:
+      net5:
+        ipv4_address: "10.1.5.3"
+      # sidenet:
+      #   ipv4_address: "172.16.0.7"
+    extra_hosts:
+      - "control:10.1.5.2"
+#      - "control:172.16.0.2"
+      - "n1:10.1.1.3"
+      - "n2:10.1.2.3"
+      - "n3:10.1.3.3"
+      - "n4:10.1.4.3"
+      - "n5:10.1.5.3"
+

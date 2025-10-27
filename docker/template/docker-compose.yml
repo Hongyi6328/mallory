@@ -10,7 +10,7 @@ x-node:
     - /run:size=100M
     - /run/lock:size=100M
   # https://serverfault.com/questions/1053187/systemd-fails-to-run-in-a-docker-container-when-using-cgroupv2-cgroupns-priva
-  cgroup_parent: docker.slice
+  # cgroup_parent: docker.slice
   volumes:
     - "jepsen-shared:/var/jepsen/shared"
     - "/jepsen:/host"
@@ -79,14 +79,15 @@ services:
       - "8080:8080"
       - "5000:5000"
     dns:
-      "127.0.0.1" # Control runs its own DNS server, which the Docker DNS server (127.0.0.11) queries!
+      - "172.18.177.130"
+      - "127.0.0.1" # Control runs its own DNS server, which the Docker DNS server (127.0.0.11) queries!
     networks:
       # sidenet:
       #   ipv4_address: "172.16.0.2"    
 %%CONTROLNETS%%
     volumes:
       - "jepsen-shared:/var/jepsen/shared"
-      - "/home/ubuntu/distributed-fuzzing:/host"
+      - "/jepsen:/host"
     extra_hosts:
     #   - "control:172.16.0.2"
 %%CONTROLHOSTS%%

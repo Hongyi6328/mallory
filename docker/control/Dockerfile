@@ -1,6 +1,15 @@
 FROM debian:buster
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LEIN_ROOT true
+# --- BEGIN: EOL mirror fix for Debian buster ---
+RUN set -eux; \
+    sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g' /etc/apt/sources.list || true; \
+    sed -i 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list || true; \
+    find /etc/apt/sources.list.d -type f -name '*.list' -print0 2>/dev/null \
+      | xargs -0 -I{} sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g; s|security.debian.org/debian-security|archive.debian.org/debian-security|g' {} || true; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::AllowInsecureRepositories "true";\n' > /etc/apt/apt.conf.d/99archive; \
+    apt-get -o Acquire::AllowInsecureRepositories=true update
+# --- END: EOL mirror fix for Debian buster ---
 
 #
 # Jepsen dependencies and other dependencies

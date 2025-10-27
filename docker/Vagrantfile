@@ -12,6 +12,7 @@ Vagrant.configure("2") do |config|
     vb.gui = false
     vb.cpus = 32
     vb.memory = "32768"
+    vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
   end
 
   # If you are running Hyper-V on your machine (e.g., running WSL 2 on Windows),
@@ -29,6 +30,25 @@ Vagrant.configure("2") do |config|
   end
   
   config.vm.provision "shell", inline: <<-SHELL
+    # --- BEGIN PERMANENT DNS FIX ---
+    # Stop and disable systemd-resolved, which is fighting us for /etc/resolv.conf
+    sudo systemctl stop systemd-resolved
+    sudo systemctl disable systemd-resolved
+
+    # Remove the (likely) symlink at /etc/resolv.conf that systemd-resolved made
+    sudo rm -f /etc/resolv.conf
+
+    # Create a new, static resolv.conf file that will not be overwritten
+    echo "nameserver 172.18.177.130" | sudo tee /etc/resolv.conf
+    echo "search comp.nus.edu.sg" | sudo tee -a /etc/resolv.conf
+    # --- END PERMANENT DNS FIX ---
+
+    # The original script starts here. It will now work.
+    sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates curl gnupg lsb-release
+    curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian \
+    $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get -y install ca-certificates curl gnupg lsb-release
     curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
     echo \

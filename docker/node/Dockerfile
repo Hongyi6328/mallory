@@ -2,6 +2,22 @@
 # See https://hub.docker.com/r/jgoerzen/debian-base-standard
 FROM docker.io/jgoerzen/debian-base-standard:buster
 
+# --- BEGIN: EOL mirror fix for Debian buster ---
+RUN set -eux; \
+    sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g' /etc/apt/sources.list || true; \
+    sed -i 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list || true; \
+    find /etc/apt/sources.list.d -type f -name '*.list' -print0 2>/dev/null \
+      | xargs -0 -I{} sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g; s|security.debian.org/debian-security|archive.debian.org/debian-security|g' {} || true; \
+    printf 'Acquire::Check-Valid-Until "false";\nAcquire::AllowInsecureRepositories "true";\n' > /etc/apt/apt.conf.d/99archive; \
+    apt-get -o Acquire::AllowInsecureRepositories=true update
+# --- END: EOL mirror fix for Debian buster ---
+
+# Ensure kmod exists for kmod-static-nodes.service (systemd)
+RUN apt-get update -qy \
+ && apt-get install -qy kmod \
+ && ln -sf /usr/bin/kmod /bin/kmod   
+ # some units still expect /bin/kmod
+
 # I think this is a bug--debian-base-setup crashes because policy-rc.d isn't
 # present in this image, and if you create it, exim crashes... do we actually NEED this? Maybe not...
 #RUN mkdir /usr/sbin/policy-rc.d
