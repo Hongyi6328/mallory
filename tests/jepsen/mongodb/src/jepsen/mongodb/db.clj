@@ -279,7 +279,7 @@
   (reify
     db/DB
     (setup! [db test node]
-      ;; (install! test)
+      (install! test)
       ;; start cov-server
       (start-cov-server test node)
       ;; wait to make sure cov-server is ready
