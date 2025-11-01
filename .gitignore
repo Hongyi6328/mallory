@@ -1,6 +1,4 @@
-/cov-server/target/*
-docker/.vagrant/*
-/mediator/target/*
-/target/*
+**/target/
+docker/.vagrant/
 pom.properties
 *.extract-native-dependencies
