@@ -829,7 +829,7 @@ impl DynamicTimeline {
 
     // Debugging and self-check.
     /// To check that all events are traversed (in phase two) exactly once.
-    fn _selfcheck_traverse_phase_two_unique(&self, ev: &LamportEvent) {
+    fn _selfcheck_traverse_phase_two_unique(&self, _: &LamportEvent) {
         #[cfg(feature = "selfcheck")]
         {
             if self._traversed_in_phase_two.contains(ev) {
@@ -840,7 +840,7 @@ impl DynamicTimeline {
     }
 
     /// To check that we don't clean up events that we haven't submitted to the summariser.
-    fn _selfcheck_only_cleanup_submitted(&self, ev: &LamportEvent) {
+    fn _selfcheck_only_cleanup_submitted(&self, _: &LamportEvent) {
         #[cfg(feature = "selfcheck")]
         {
             if !self._submitted_to_summary_manager.contains(ev) {
@@ -853,7 +853,7 @@ impl DynamicTimeline {
     }
 
     /// To check that all events are submitted exactly once to the summary manager.
-    fn _selfcheck_register_unique_addition(&self, ev: &LamportEvent) {
+    fn _selfcheck_register_unique_addition(&self, _: &LamportEvent) {
         #[cfg(feature = "selfcheck")]
         {
             if self._submitted_to_summary_manager.contains(ev) {
@@ -869,8 +869,8 @@ impl DynamicTimeline {
     /// Check that all events in the timeline up to the given one were submitted to the summariser.
     fn _selfcheck_submitted_all_to_summariser_up_to(
         &self,
-        timeline: &MutexGuard<BTreeSet<LamportEvent>>,
-        last_ev: Option<&LamportEvent>,
+        _: &MutexGuard<BTreeSet<LamportEvent>>,
+        _: Option<&LamportEvent>,
     ) {
         #[cfg(feature = "selfcheck")]
         {
@@ -970,7 +970,7 @@ impl CommitManager {
     fn have_events_before(&self, have: Vec<(ProcessId, MonotonicTimestamp)>) {
         let mut have_all_events_before = self.have_all_events_before.lock();
         for (proc, ts) in have {
-            let mut entry = have_all_events_before.entry(proc).or_insert(ts);
+            let entry = have_all_events_before.entry(proc).or_insert(ts);
             if ts >= *entry {
                 *entry = ts;
             } else {

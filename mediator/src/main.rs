@@ -8,10 +8,18 @@ mod history;
 mod nemesis;
 mod net;
 
+use crate::feedback::producers::{
+    MMConfig, MMEventKindMapper, MMRewardConfig, MMStateRecordConfig, SimilarityConfig,
+    SymmetryReductionScheme, EventKindConfig, PartitionScheme
+};
+use crate::feedback::reward;
 use crate::history::time::{AbsoluteTimestamp, ClockManager, UnsourcedMonotonicTimestamp};
 use crate::history::History;
 use crate::nemesis::AdaptiveNemesis;
 use crate::net::{firewall::Firewall, packet::Packet};
+
+use nalgebra::Similarity;
+use serde::Deserialize;
 
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -28,7 +36,7 @@ use nemesis::interfaces::jepsen::JepsenAdaptiveNemesis;
 use nix::sys::select::{select, FdSet};
 use nix::sys::time::TimeValLike;
 use rocket::form::Form;
-use rocket::serde::{json::Json, Deserialize};
+use rocket::serde::json::Json;
 use state::Storage;
 use std::collections::VecDeque;
 use std::env;
@@ -43,7 +51,7 @@ use std::process;
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tikv_jemalloc_ctl::{epoch, stats};
@@ -82,6 +90,13 @@ pub struct MediatorConfig {
     schedule_type: String,
     feedback_type: String,
     state_similarity_threshold: f64,
+
+    use_old_summary_kinds: bool,
+    global_mm_config: Arc<MMConfig>,
+    per_event_mm_config: Arc<MMConfig>,
+    similarity_config: Arc<SimilarityConfig>,
+    record_config: Arc<MMStateRecordConfig>,
+    reward_config: Arc<MMRewardConfig>,
 }
 
 struct BucketProcessingStats {
@@ -360,7 +375,7 @@ fn dump_run() {
 
     // Copy the ShiViz trace into the Jepsen run directory.
     let tmp_shiviz_log_filename = CFG.get().shiviz_log_filename.clone();
-    if Path::new(&tmp_shiviz_log_filename).exists(){
+    if Path::new(&tmp_shiviz_log_filename).exists() {
         let shiviz_log_path = Path::new(&path_base).join("shiviz.log");
         std::fs::copy(tmp_shiviz_log_filename, shiviz_log_path)
             .expect("Could not store shiviz.log in Jepsen run directory.");
@@ -739,7 +754,11 @@ fn nfqueue_loop(nfqueue: &mut nfq::Queue) -> Result<(), Box<dyn Error>> {
  * Configuration and logging *
  *****************************/
 
-fn read_configuration(schedule_type: &String, feedback_type: &String, state_similarity_threshold: f64) -> Result<(), Box<dyn Error>> {
+fn read_configuration(
+    schedule_type: &String,
+    feedback_type: &String,
+    state_similarity_threshold: f64,
+) -> Result<(), Box<dyn Error>> {
     let settings = Config::builder()
         .add_source(config::File::with_name("Mediator"))
         // Add in settings from env, with a prefix of MED, e.g. MED_DEBUG=1
@@ -771,6 +790,167 @@ fn read_configuration(schedule_type: &String, feedback_type: &String, state_simi
     let shiviz_log_filename = settings.get_string("shiviz_log_filename")?;
     let event_log_filename = settings.get_string("event_log_filename")?;
     let iptables_rules_filename = settings.get_string("iptables_rules_filename")?;
+
+    // ===================================================================
+    // New MMEventHistory Configuration
+    // ===================================================================
+    let num_nodes = settings.get_int("num_nodes")?;
+    let symmetry_reduction_scheme: SymmetryReductionScheme =
+        match settings.get_string("symmetry_reduction_scheme")?.as_str() {
+            "None" => SymmetryReductionScheme::None,
+            "Sort" => SymmetryReductionScheme::Sort,
+            "Merge" => SymmetryReductionScheme::Merge,
+            _ => return Err("Invalid symmetry_reduction_scheme".into()),
+        };
+    let categorize_message_by_data = settings.get("categorize_message_by_data")?;
+    let use_old_summary_kinds: bool = settings.get("use_old_summary_kinds")?;
+
+    // ===================================================================
+    // New MMEventHistory Global State Configuration
+    // ===================================================================
+    let global_split_vc_mm = settings.get_bool("global_split_vc_mm")?;
+    let global_record_sender_partition = settings.get_bool("global_record_sender_partition")?;
+
+    let global_num_local_event_partitions =
+        settings.get_int("global_num_local_event_partitions")?;
+    let global_local_event_partition_len = settings.get_int("global_local_event_partition_len")?;
+    let global_num_message_events_partitions =
+        settings.get_int("global_num_message_events_partitions")?;
+    let global_message_event_partition_len =
+        settings.get_int("global_message_event_partition_len")?;
+
+    let global_num_local_event_kinds = settings.get_int("global_num_local_event_kinds")?;
+    let global_num_message_event_kinds = settings.get_int("global_num_message_event_kinds")?;
+
+    // ===================================================================
+    // New MMEventHistory Per-Event State Configuration
+    // ===================================================================
+    let per_event_split_vc_mm = settings.get_bool("per_event_split_vc_mm")?;
+    let per_event_record_sender_partition =
+        settings.get_bool("per_event_record_sender_partition")?;
+
+    let per_event_num_local_event_partitions =
+        settings.get_int("per_event_num_local_event_partitions")?;
+    let per_event_local_event_partition_len =
+        settings.get_int("per_event_local_event_partition_len")?;
+    let per_event_num_message_events_partitions =
+        settings.get_int("per_event_num_message_events_partitions")?;
+    let per_event_message_event_partition_len =
+        settings.get_int("per_event_message_event_partition_len")?;
+
+    let per_event_num_local_event_kinds = settings.get_int("per_event_num_local_event_kinds")?;
+    let per_event_num_message_event_kinds =
+        settings.get_int("per_event_num_message_event_kinds")?;
+
+    // ===================================================================
+    // New Similarity, Record, and Reward Configurations
+    // ===================================================================
+    let mm_use_absolute_similarity_threshold =
+        settings.get_bool("mm_use_absolute_similarity_threshold")?;
+    let mm_event_history_global_similarity_threshold =
+        settings.get_float("mm_event_history_global_similarity_threshold")?;
+    let mm_event_history_per_event_similarity_threshold =
+        settings.get_float("mm_event_history_per_event_similarity_threshold")?;
+    let mm_event_history_global_similarity_threshold_vc =
+        settings.get_float("mm_event_history_global_similarity_threshold_vc")?;
+    let mm_event_history_global_similarity_threshold_mm =
+        settings.get_float("mm_event_history_global_similarity_threshold_mm")?;
+    let mm_event_history_per_event_similarity_threshold_vc =
+        settings.get_float("mm_event_history_per_event_similarity_threshold_vc")?;
+    let mm_event_history_per_event_similarity_threshold_mm =
+        settings.get_float("mm_event_history_per_event_similarity_threshold_mm")?;
+
+    let record_global_mm_state_only_on_reward_reporting =
+        settings.get_bool("record_global_mm_state_only_on_reward_reporting")?;
+    let global_mm_state_record_interval = settings.get_int("global_mm_state_record_interval")?;
+    let record_per_event_mm_state = settings.get_bool("record_per_event_mm_state")?;
+    let per_event_mm_state_record_interval_normal =
+        settings.get_int("per_event_mm_state_record_interval_normal")?;
+    let per_event_mm_state_record_interval_special =
+        settings.get_int("per_event_mm_state_record_interval_special")?;
+    let special_event_threshold = settings.get_int("special_event_threshold")?;
+
+    let reward_on_global_state_change = settings.get_float("reward_on_global_state_change")?;
+    let reward_on_per_event_state_change =
+        settings.get_float("reward_on_per_event_state_change")?;
+    let use_cool_down_factor = settings.get_bool("use_cool_down_factor")?;
+    let cool_down_threshold = settings.get_int("cool_down_threshold")?;
+
+    let global_partition_scheme: PartitionScheme = PartitionScheme {
+        num_local_event_partitions: global_num_local_event_partitions as usize,
+        local_event_partition_len: global_local_event_partition_len as usize,
+        num_message_events_partitions: global_num_message_events_partitions as usize,
+        message_event_partition_len: global_message_event_partition_len as usize,
+    };
+
+    let global_event_kind_config: EventKindConfig = EventKindConfig {
+        num_local_event_kinds: global_num_local_event_kinds as usize,
+        num_message_event_kinds: global_num_message_event_kinds as usize,
+        categorize_message_by_data: categorize_message_by_data,
+    };
+
+    let global_event_kind_mapper: MMEventKindMapper = MMEventKindMapper::from_config(&global_event_kind_config);
+
+    let global_mm_config: MMConfig = MMConfig {
+        num_nodes: num_nodes as usize,
+        split_vc_mm: global_split_vc_mm,
+        record_sender_partition: global_record_sender_partition,
+        partition_scheme: global_partition_scheme,
+        symmetry_reduction_scheme: symmetry_reduction_scheme.clone(),
+        event_kind_config: global_event_kind_config,
+        event_mapper: Arc::new(RwLock::new(global_event_kind_mapper)),
+    };
+
+    let per_event_partition_scheme: PartitionScheme = PartitionScheme {
+        num_local_event_partitions: per_event_num_local_event_partitions as usize,
+        local_event_partition_len: per_event_local_event_partition_len as usize,
+        num_message_events_partitions: per_event_num_message_events_partitions as usize,
+        message_event_partition_len: per_event_message_event_partition_len as usize,
+    };
+
+    let per_event_event_kind_config: EventKindConfig = EventKindConfig {
+        num_local_event_kinds: per_event_num_local_event_kinds as usize,
+        num_message_event_kinds: per_event_num_message_event_kinds as usize,
+        categorize_message_by_data: categorize_message_by_data,
+    };
+
+    let per_event_event_kind_mapper: MMEventKindMapper = MMEventKindMapper::from_config(&per_event_event_kind_config);
+
+    let per_event_mm_config: MMConfig = MMConfig {
+        num_nodes: num_nodes as usize,
+        split_vc_mm: per_event_split_vc_mm,
+        record_sender_partition: per_event_record_sender_partition,
+        partition_scheme: per_event_partition_scheme,
+        symmetry_reduction_scheme: symmetry_reduction_scheme,
+        event_kind_config: per_event_event_kind_config,
+        event_mapper: Arc::new(RwLock::new(per_event_event_kind_mapper)),
+    };
+
+    let similarity_config = SimilarityConfig {
+        mm_use_absolute_similarity_threshold: mm_use_absolute_similarity_threshold,
+        mm_event_history_global_similarity_threshold: mm_event_history_global_similarity_threshold,
+        mm_event_history_per_event_similarity_threshold: mm_event_history_per_event_similarity_threshold,
+        mm_event_history_global_similarity_threshold_vc: mm_event_history_global_similarity_threshold_vc,
+        mm_event_history_global_similarity_threshold_mm: mm_event_history_global_similarity_threshold_mm,
+        mm_event_history_per_event_similarity_threshold_vc: mm_event_history_per_event_similarity_threshold_vc,
+        mm_event_history_per_event_similarity_threshold_mm: mm_event_history_per_event_similarity_threshold_mm,
+    };
+
+    let record_config = MMStateRecordConfig {
+        record_global_mm_state_only_on_reward_reporting: record_global_mm_state_only_on_reward_reporting,
+        global_mm_state_record_interval: global_mm_state_record_interval as usize,
+        record_per_event_mm_state: record_per_event_mm_state,
+        per_event_mm_state_record_interval_normal: per_event_mm_state_record_interval_normal as usize,
+        per_event_mm_state_record_interval_special: per_event_mm_state_record_interval_special as usize,
+        special_event_threshold: special_event_threshold as usize,
+    };
+
+    let reward_config = MMRewardConfig {
+        reward_on_global_state_change: reward_on_global_state_change,
+        reward_on_per_event_state_change: reward_on_per_event_state_change,
+        use_cool_down_factor: use_cool_down_factor,
+        cool_down_threshold: cool_down_threshold as usize,
+    };
 
     let exp_ifaces = net::util::get_experiment_interfaces(experiment_network)?;
     let num_nodes = exp_ifaces.len() as u8;
@@ -818,6 +998,14 @@ fn read_configuration(schedule_type: &String, feedback_type: &String, state_simi
         schedule_type,
         feedback_type,
         state_similarity_threshold,
+
+
+        use_old_summary_kinds,
+        global_mm_config: Arc::new(global_mm_config),
+        per_event_mm_config: Arc::new(per_event_mm_config),
+        similarity_config: Arc::new(similarity_config),
+        record_config: Arc::new(record_config),
+        reward_config: Arc::new(reward_config),
     };
 
     CFG.set(cfg);
@@ -862,6 +1050,20 @@ fn setup_history(feedback_type: &String) {
         feedback_type,
         state_similarity_threshold,
     )));
+}
+
+fn copy_config_file_to_store() {
+    let config_src = "Mediator.toml";
+    let history = HISTORY.get();
+    let path_base = history.dump();
+    let config_dst = Path::new(&path_base).join("Mediator.toml");
+    match std::fs::copy(config_src, config_dst) {
+        Ok(_) => log::info!("[SAVE] Copied configuration file to run directory."),
+        Err(e) => log::warn!(
+            "[SAVE] Could not copy configuration file to run directory: {}",
+            e
+        ),
+    }
 }
 
 /// Print memory usage statistics.
@@ -943,10 +1145,13 @@ async fn main() -> Result<(), rocket::Error> {
     let state_similarity_threshold = args[3].parse::<f64>().unwrap();
 
     // Initialisation
-    read_configuration(schedule_type, feedback_type, state_similarity_threshold).expect("could not parse configuration");
+    read_configuration(schedule_type, feedback_type, state_similarity_threshold)
+        .expect("could not parse configuration");
     setup_logging().expect("could not set up logging");
     let mut nfqueue = setup_networking().expect("could not set up networking");
     setup_history(feedback_type);
+
+    copy_config_file_to_store();
 
     // Restore firewall rules to their initial state upon Ctrl + C or at normal program exit
     ctrlc::set_handler(move || {

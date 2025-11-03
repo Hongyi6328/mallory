@@ -17,7 +17,7 @@ use siphasher::sip::SipHasher;
 #[cfg(feature = "selfcheck")]
 use crate::nemesis::schedules::ScheduleId;
 use crate::{
-    event::{AdministrativeEvent, BlockId, Event, FunctionId, LamportEvent, NodeId, ProcessId},
+    event::{AdministrativeEvent, Event, LamportEvent, NodeId, ProcessId},
     feedback::{
         reward::{RewardEntry, RewardFunction, SummaryTask},
         JEPSEN_NODE_ID,
@@ -27,33 +27,7 @@ use crate::{
 
 use super::{LayeredChangeAwareSet, SummaryProducer, SummaryProducerIdentifier, VectorClock};
 
-/// Coalesces concrete events into their "kind". This only collects "real"
-/// events, i.e. of the SUT, and not "environment" events, like `ClientRequest`
-/// `ClientResponse` or `Fault`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
-pub enum EventKind {
-    BlockExecute { block_id: BlockId },
-    FunctionExecute { function_id: FunctionId },
-    PacketSend { data: u32, from: NodeId, to: NodeId },
-    PacketReceive { data: u32, from: NodeId, to: NodeId },
-    ResetSummary,
-}
-
-impl fmt::Display for EventKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::BlockExecute { block_id } => write!(f, "BB({})", block_id),
-            Self::FunctionExecute { function_id } => write!(f, "F({})", function_id),
-            Self::PacketSend { data, from, to } => {
-                write!(f, "Send({} from {} to {})", data, from, to)
-            }
-            Self::PacketReceive { data, from, to } => {
-                write!(f, "Receive({} from {} at {})", data, from, to)
-            }
-            Self::ResetSummary => write!(f, "Reset"),
-        }
-    }
-}
+use crate::feedback::producers::EventKind;
 
 fn zscores_str(zscores: &[(ProcessId, EventKind, f32)]) -> String {
     zscores
@@ -65,44 +39,6 @@ fn zscores_str(zscores: &[(ProcessId, EventKind, f32)]) -> String {
 
 type EventPair = (EventKind, EventKind);
 type EventTriplet = (EventKind, EventKind, EventKind);
-
-impl EventKind {
-    fn from_event(event: &LamportEvent) -> Option<EventKind> {
-        match event.bare_event() {
-            Event::BlockExecute { block_id, .. } => Some(EventKind::BlockExecute {
-                block_id: *block_id,
-            }),
-            Event::FunctionExecute { function_id, .. } => Some(EventKind::FunctionExecute {
-                function_id: *function_id,
-            }),
-            Event::PacketSend { data, to, .. } => Some(EventKind::PacketSend {
-                data: *data,
-                from: event.proc(),
-                to: *to,
-            }),
-            Event::PacketReceive { data, from, .. } => Some(EventKind::PacketReceive {
-                data: *data,
-                from: *from,
-                to: event.proc(),
-            }),
-            Event::TimelineEvent(AdministrativeEvent::StartWindow { .. }) => {
-                Some(EventKind::ResetSummary)
-            }
-            _ => None,
-        }
-    }
-
-    fn is_packet_recv(&self) -> bool {
-        matches!(self, Self::PacketReceive { .. })
-    }
-
-    fn is_execution(&self) -> bool {
-        matches!(
-            self,
-            Self::BlockExecute { .. } | Self::FunctionExecute { .. }
-        )
-    }
-}
 
 #[derive(Clone)]
 pub struct EventHistory {
@@ -146,7 +82,7 @@ impl fmt::Display for EventHistory {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut procs = self.num_events.keys().cloned().collect::<Vec<_>>();
         procs.sort_unstable();
-        writeln!(f, "H[")?;
+        writeln!(f, "OLD_EVENT_HISTORY[")?;
         writeln!(f, "{}", self.vc)?;
         for proc in procs {
             let num_events = self.num_events.get(&proc).unwrap_or(&0);
@@ -184,6 +120,11 @@ impl fmt::Display for EventHistory {
             )?
         }
 
+        let unified_events: usize = self
+            .num_events
+            .values()
+            .sum::<usize>();
+
         let unified_exec_events = self
             .unique_exec_events
             .values()
@@ -204,7 +145,8 @@ impl fmt::Display for EventHistory {
 
         writeln!(
             f,
-            "Unified: {} exec-unique / {} exec-pairs / {} exec-triplets",
+            "Unified: {} events / {} exec-unique / {} exec-pairs / {} exec-triplets",
+            unified_events,
             unified_exec_events.len(),
             unified_exec_pairs.len(),
             unified_exec_triplets.len()
@@ -230,7 +172,7 @@ impl fmt::Display for EventHistory {
         let top_n = most_hit.iter().take(first_n).cloned().collect::<Vec<_>>();
         write!(
             f,
-            "Most hit states: {:?} ({} states seen, {} unique)",
+            "Most hit states: {:?} ({} states seen, {} unique states)",
             top_n,
             total_visits,
             self.unique_states.len()
@@ -570,7 +512,7 @@ impl SummaryProducer for EventHistory {
         // self.cross_process_unique_exec_events.clear();
         // self.cross_process_unique_exec_pairs.clear();
         // self.cross_process_unique_exec_triplets.clear();
-        log::debug!("[TRIPLETS] ResetSummary.")
+        log::debug!("[EventHistory] ResetSummary.")
     }
 
     fn update(&mut self, new_event: &LamportEvent, state_similarity_threshold: f64) {
@@ -730,7 +672,7 @@ impl RewardFunction for EventHistory {
             SummaryProducerIdentifier::EventHistory,
             task,
             this_state,
-            reward_for_step,
+            reward_for_step as f64,
         )
     }
 }
@@ -816,7 +758,7 @@ impl StateDescriptor for EventHistory {
 
         let hash = global_pair_hash;
         log::info!(
-            "[PKT STATE] {:?} | [EVENTS STATE]: {:?} | [PAIRS STATE]: {:?}",
+            "[PKT OLD_STATE] {:?} | [EVENTS OLD_STATE]: {:?} | [PAIRS OLD_STATE]: {:?}",
             packets,
             events,
             global_pairs
@@ -864,19 +806,19 @@ impl StateDescriptor for EventHistory {
 
                 if similarity > state_similarity_threshold {
                     log::debug!(
-                        "[STATE] The current state is similar to one old state: {} -> {}; Similarity: {}",
+                        "[OLD_STATE] The current state is similar to one old state: {} -> {}; Similarity: {}",
                         current_state,
                         *state_id,
                         similarity
                     );
-                    log::debug!("[STATE] The following is in details:");
+                    log::debug!("[OLD_STATE] The following is in details:");
                     global_pairs_string.iter().for_each(|x| {
                         log::debug!("{:?}", x);
                     });
                     return *state_id;
                 } else {
                     log::debug!(
-                        "[STATE] Similarity between {} and {}: {}",
+                        "[OLD_STATE] Similarity between {} and {}: {}",
                         current_state,
                         *state_id,
                         similarity
@@ -887,18 +829,18 @@ impl StateDescriptor for EventHistory {
 
             state_min_hashes.insert(min_hash1, current_state);
             log::debug!(
-                "[STATE] The total length of state hashes: {}",
+                "[OLD_STATE] The total length of state hashes: {}",
                 state_min_hashes.len()
             );
 
             let duration = begin_time.elapsed();
             log::info!(
-                "[STATE] Time to calculate the similarity between the new state and old states: {:?}",
+                "[OLD_STATE] Time to calculate the similarity between the new state and old states: {:?}",
                 duration
             );
 
-            log::debug!("[STATE] Observe one new state: {}", current_state);
-            log::debug!("[STATE] The following is in details:");
+            log::debug!("[OLD_STATE] Observe one new state: {}", current_state);
+            log::debug!("[OLD_STATE] The following is in details:");
             global_pairs_string.iter().for_each(|x| {
                 log::debug!("{:?}", x);
             });

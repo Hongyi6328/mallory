@@ -235,7 +235,7 @@ impl RewardFunction for AFLBranchFeedback {
         let reward = RewardEntry::new(
             SummaryProducerIdentifier::AFLBranchFeedback,
             task,
-            reward_value,
+            reward_value as f64,
         );
         log::info!(
             "[REWARD][AFLSummary] Reward: {:?} ({} newly branch hitted, {}/{} hit count increased)",

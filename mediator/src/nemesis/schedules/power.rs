@@ -64,7 +64,7 @@ impl PowerScheduler {
         }
     }
 
-    fn add_seed_entry(&self, schedule_id: ScheduleId, total_reward: i32) {
+    fn add_seed_entry(&self, schedule_id: ScheduleId, total_reward: f64) {
         let guard = &crossbeam_epoch::pin();
         if self.seed_num.load(Ordering::Relaxed) < MAX_SEED_ENTRIES {
             // Case 1: if the seed queue is not full (< MAX_SEED_ENTRIES)
@@ -201,7 +201,7 @@ impl PowerScheduler {
                     Some(s) => {
                         *cached_schedule = s.sched.clone();
                         self.left_times_to_mutate
-                            .store(seed_entry.total_reward - 1, Ordering::Relaxed);
+                            .store((seed_entry.total_reward - 1.0).round() as i32, Ordering::Relaxed);
                         self.produce_schedule(s.sched.clone())
                     }
                     None => {
@@ -337,7 +337,7 @@ impl DiscreteStepScheduler for PowerScheduler {
         // Get the reward value based on the schedule id
         let schedule_entry = schedules_waiting_rewards
             .entry(schedule_id)
-            .or_insert_with(|| 0);
+            .or_insert_with(|| 0.0);
 
         // Update the reward value
         *schedule_entry += reward_for_step;
@@ -353,7 +353,7 @@ impl DiscreteStepScheduler for PowerScheduler {
             // Remove the entry from the map
             let total_reward = schedules_waiting_rewards.remove(&ready_schedule).unwrap();
             // Add the entry to the seed queue
-            self.add_seed_entry(ready_schedule, total_reward);
+            self.add_seed_entry(ready_schedule, total_reward );
 
             log::info!(
                 "[PowerScheduler] Schedule {} is ready, total reward: {}",
@@ -376,10 +376,22 @@ impl DiscreteStepScheduler for PowerScheduler {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq,Debug, PartialOrd)]
 struct SeedEntry {
     total_reward: RewardValue,
     schedule_id: ScheduleId,
+}
+
+impl Eq for SeedEntry {}
+
+impl Ord for SeedEntry {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        // We want the seed entry with the highest reward to be the smallest
+        other
+            .total_reward
+            .partial_cmp(&self.total_reward)
+            .unwrap_or(cmp::Ordering::Equal)
+    }
 }
 
 impl fmt::Display for SeedEntry {
