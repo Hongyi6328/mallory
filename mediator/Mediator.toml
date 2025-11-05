@@ -35,7 +35,7 @@ num_nodes = 7
 symmetry_reduction_scheme = "None"  # Options: "None", "Sort", "Merge"
                                     # "Merge" is not implemented yet
 categorize_message_by_data = true
-use_old_summary_as_reward = false
+use_old_summary_for_reward = false
 
 # ===================================================================
 # New MMEventHistory Global State Configuration
