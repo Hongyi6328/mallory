@@ -69,7 +69,7 @@ pub struct SummaryWrapper<T: SummaryProducer + Clone> {
     //   from that event have been traversed.
     state_similarity_threshold: f64,
 
-    use_old_event_summary: bool,
+    use_old_summary_for_reward: bool,
 
     mm_event_history_stat: MMEventHistoryStat,
 
@@ -117,7 +117,7 @@ where
             state_similarity_threshold,
 
             // NEW MM STUFF
-            use_old_event_summary: CFG.get().use_old_summary_kinds,
+            use_old_summary_for_reward: CFG.get().use_old_summary_for_reward,
             mm_event_history_stat: MMEventHistoryStat::new(
                 CFG.get().global_mm_config.clone(),
                 CFG.get().per_event_mm_config.clone(),
@@ -475,7 +475,7 @@ where
             let state_similarity_threshold = self.state_similarity_threshold;
             if let Some(nemesis) = nemesis {
                 let start3 = Instant::now();
-                T::reward_function(
+                let old_reward_entry = T::reward_function(
                     task.clone(),
                     &self.overall_cumulative.1,
                     schedule_cumulative,
@@ -497,13 +497,17 @@ where
 
                 let mut hasher = SipHasher::new_with_keys(0, 0);
                 mm_history.hash(&mut hasher);
-                let reward_entry = RewardEntry::new_with_post_state(
+                let mm_reward_entry = RewardEntry::new_with_post_state(
                     SummaryProducerIdentifier::EventHistory,
                     task.clone(),
                     hasher.finish() as StateId,
                     reward,
                 );
-                nemesis.report_reward(&reward_entry, summary_producers);
+                nemesis.report_reward(if self.use_old_summary_for_reward {
+                    &old_reward_entry
+                } else {
+                    &mm_reward_entry
+                }, summary_producers);
 
                 writeln!(summary_log_file, "{}", self.mm_event_history_stat)
                     .expect("Failed to write MMEventHistoryStat to summary log file!");

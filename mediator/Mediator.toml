@@ -35,7 +35,7 @@ num_nodes = 7
 symmetry_reduction_scheme = "None"  # Options: "None", "Sort", "Merge"
                                     # "Merge" is not implemented yet
 categorize_message_by_data = true
-use_old_summary_kinds = true
+use_old_summary_as_reward = false
 
 # ===================================================================
 # New MMEventHistory Global State Configuration
@@ -96,6 +96,6 @@ special_event_threshold = 20 # Not used yet
 
 # [reward_config]
 reward_on_global_state_change = 1.0
-reward_on_per_event_state_change = 0.01
+reward_on_per_event_state_change = 0.8
 use_cool_down_factor = true
-cool_down_threshold = 20
+cool_down_threshold = 40

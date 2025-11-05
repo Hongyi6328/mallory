@@ -91,7 +91,7 @@ pub struct MediatorConfig {
     feedback_type: String,
     state_similarity_threshold: f64,
 
-    use_old_summary_kinds: bool,
+    use_old_summary_for_reward: bool,
     global_mm_config: Arc<MMConfig>,
     per_event_mm_config: Arc<MMConfig>,
     similarity_config: Arc<SimilarityConfig>,
@@ -805,7 +805,7 @@ fn read_configuration(
             _ => return Err("Invalid symmetry_reduction_scheme".into()),
         };
     let categorize_message_by_data = settings.get("categorize_message_by_data")?;
-    let use_old_summary_kinds: bool = settings.get("use_old_summary_kinds")?;
+    let use_old_summary_for_reward: bool = settings.get("use_old_summary_for_reward")?;
 
     // ===================================================================
     // New MMEventHistory Global State Configuration
@@ -1002,7 +1002,7 @@ fn read_configuration(
         state_similarity_threshold,
 
 
-        use_old_summary_kinds,
+        use_old_summary_for_reward: use_old_summary_for_reward,
         global_mm_config: Arc::new(global_mm_config),
         per_event_mm_config: Arc::new(per_event_mm_config),
         similarity_config: Arc::new(similarity_config),
