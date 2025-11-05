@@ -86,7 +86,7 @@ RUN git clone https://github.com/apache/incubator-brpc.git brpc
 WORKDIR /opt/fs/brpc
 RUN git checkout 1.4.0
 RUN apt-get install -y libgoogle-glog-dev
-RUN bash config_brpc.sh --headers=/usr/include --libs=/usr/lib --with-glog && make -j4
+RUN bash config_brpc.sh --headers=/usr/include --libs=/usr/lib --with-glog && make -j8
 RUN cp -r /opt/fs/brpc/output/* /
 
 # Instrumentor
@@ -127,14 +127,14 @@ RUN python3 /opt/instrumentor/tell_instr_targets.py --input ./src --output .
 RUN mkdir bld && cd bld && cmake -DBRPC_WITH_GLOG=ON .. \
     && export TARGETS_FILE=/opt/fs/braft/instr-targets.txt \
     && export AFL_USE_ASAN=1 \
-    && make -j4 \
+    && make -j8 \
     # install BRaft & braft_cli
     && cp -r /opt/fs/braft/bld/output/* / \
     && cp -r /opt/fs/braft/bld/tools/output/* / \
     && cd /opt/fs/braft/example/atomic \
     && cmake . && export TARGETS_FILE=/opt/fs/raft-c/instr-targets.txt \
     && export AFL_USE_ASAN=1 \
-    && make -j4
+    && make -j8
 RUN mv /opt/instrumentor/BB2ID.txt /opt/instrumentor/braft_CodeLocToBBID.txt || true
 COPY jepsen/tests/mallory/braft/resources/jepsen_control.sh /opt/fs/braft/example/atomic/jepsen_control.sh
 
@@ -168,13 +168,13 @@ RUN cd dqlite-raft \
     && export TARGETS_FILE=/opt/fs/dqlite-raft/instr-targets.txt \
     && autoreconf -i \
     && ./configure --enable-debug --enable-sanitize \
-    && make -j4 \
+    && make -j8 \
     && make install \
     && cd ../dqlite \
     && export TARGETS_FILE=/opt/fs/dqlite/instr-targets.txt \
     && autoreconf -i \
     && ./configure --enable-debug --enable-sanitize \
-    && make -j4 \
+    && make -j8 \
     && make install
 RUN mv /opt/instrumentor/BB2ID.txt /opt/instrumentor/dqlite_CodeLocToBBID.txt || true
 
@@ -221,11 +221,11 @@ ENV CC=/opt/instrumentor/llvm_mode/afl-clang-fast
 WORKDIR /opt/fs
 RUN cd redis && make distclean \
     && export TARGETS_FILE=/opt/fs/redis/instr-targets.txt \
-    && make -j4 SANITIZER=address \
+    && make -j8 SANITIZER=address \
     && cd ../redisraft && mkdir build && cd build \
     && export TARGETS_FILE=/opt/fs/redisraft/instr-targets.txt \
     && cmake .. -DSANITIZER=address \
-    && make -j4
+    && make -j8
 RUN mv /opt/instrumentor/BB2ID.txt /opt/instrumentor/redisraft_CodeLocToBBID.txt || true
 RUN cp /opt/fs/redis/src/redis-server /opt/redis/
 RUN chmod +x /opt/redis/redis-server
