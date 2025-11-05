@@ -152,7 +152,7 @@ fn start_test(data: Form<TestStart>) {
     let mut store_path = run.store_path.write();
     *store_path = data.store_path.clone();
 
-    copy_config_file_to_store();
+    copy_config_file_to_store(&store_path);
 
     let ts = data.start_time.clone();
     let dt = DateTime::parse_from_rfc3339(&ts).unwrap();
@@ -1054,10 +1054,8 @@ fn setup_history(feedback_type: &String) {
     )));
 }
 
-fn copy_config_file_to_store() {
+fn copy_config_file_to_store(path_base: &str) {
     let config_src = "Mediator.toml";
-    let history = HISTORY.get();
-    let path_base = history.store_path.read().clone();
     let config_dst = Path::new(&path_base).join("Mediator.toml");
     match std::fs::copy(config_src, config_dst) {
         Ok(_) => log::info!("[SAVE] Copied configuration file to {}/Mediator.toml", path_base),

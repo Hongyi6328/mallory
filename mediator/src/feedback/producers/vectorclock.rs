@@ -27,12 +27,12 @@ pub struct VectorClock {
 impl fmt::Display for VectorClock {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut procs = self.v_ts.keys().cloned().collect::<Vec<_>>();
-        let last_idx = procs.len() - 1;
+        // let last_idx = procs.len() - 1;
         procs.sort_unstable();
         // We produce JSON output that can be consumed by ShiViz.
         write!(f, "{{")?;
-        for (i, proc) in procs.iter().enumerate() {
-            let separator = if i == last_idx { "" } else { ", " };
+        for (_, proc) in procs.iter().enumerate() {
+            let separator = ", ";
             write!(f, "\"{}\": {}{}", proc, self.get_seqnum(*proc), separator)?
         }
         write!(f, "}}")?;

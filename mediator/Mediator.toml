@@ -45,14 +45,14 @@ global_split_vc_mm = false
 global_record_sender_partition = false
 
 # [mmeventhistory_global.partition_scheme]
-global_num_local_event_partitions = 2
+global_num_local_event_partitions = 1
 global_local_event_partition_len = 100
-global_num_message_events_partitions = 2
+global_num_message_events_partitions = 1
 global_message_event_partition_len = 100
 
 # [mmeventhistory_global.event_kind_config]
-global_num_local_event_kinds = 16
-global_num_message_event_kinds = 16
+global_num_local_event_kinds = 1
+global_num_message_event_kinds = 1
 
 # ===================================================================
 # New MMEventHistory Per-Event State Configuration
@@ -68,16 +68,16 @@ per_event_num_message_events_partitions = 1
 per_event_message_event_partition_len = 1
 
 # [mmeventhistory_per_event.event_kind_config]
-per_event_num_local_event_kinds = 8
-per_event_num_message_event_kinds = 8
+per_event_num_local_event_kinds = 1
+per_event_num_message_event_kinds = 1
 
 # ===================================================================
 # New Similarity, Record, and Reward Configurations
 # ===================================================================
 # [similarity]
 mm_use_absolute_similarity_threshold = false
-mm_event_history_global_similarity_threshold = 0.3
-mm_event_history_per_event_similarity_threshold = 0.3
+mm_event_history_global_similarity_threshold = 0.5
+mm_event_history_per_event_similarity_threshold = 0.5
 mm_event_history_global_similarity_threshold_vc = 0.3
 mm_event_history_global_similarity_threshold_mm = 0.3
 mm_event_history_per_event_similarity_threshold_vc = 0.3
@@ -90,7 +90,7 @@ mm_event_history_per_event_similarity_threshold_mm = 0.3
 record_global_mm_state_only_on_reward_reporting = true
 global_mm_state_record_interval = 100
 record_per_event_mm_state = true
-per_event_mm_state_record_interval_normal = 100
+per_event_mm_state_record_interval_normal = 10
 per_event_mm_state_record_interval_special = 100 # Not used yet
 special_event_threshold = 20 # Not used yet
 
@@ -98,4 +98,4 @@ special_event_threshold = 20 # Not used yet
 reward_on_global_state_change = 1.0
 reward_on_per_event_state_change = 0.01
 use_cool_down_factor = true
-cool_down_threshold = 50
+cool_down_threshold = 20

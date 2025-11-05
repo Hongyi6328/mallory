@@ -2,11 +2,11 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::hash::Hash;
+use std::hash::Hasher;
 use std::io::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::hash::Hasher;
 
 use enum_dispatch::enum_dispatch;
 use hashbrown::hash_map::Entry;
@@ -29,7 +29,9 @@ use crate::nemesis::AdaptiveNemesis;
 use crate::CFG;
 
 // This seems needed by the `enum_dispatch` macro
-use crate::feedback::producers::{AFLBranchFeedback, EventCount, EventHistory, VectorClock};
+use crate::feedback::producers::{
+    AFLBranchFeedback, EventCount, EventHistory, EventKind, VectorClock,
+};
 use crate::nemesis::schedules::{ScheduleId, StateId, StepId};
 
 use super::producers::{SummaryKind, SummaryProducer, SummaryProducerIdentifier};
@@ -294,8 +296,15 @@ where
             .mm_event_history_for_event
             .get_mut(this_ev)
             .expect("Missing MMEventHistory for dependency!");
-        self.mm_event_history_stat
-                .update_event(this_ev, &this_mm_event_history);
+        if let Some(event_kind) = EventKind::from_event(this_ev) {
+            if matches!(event_kind, EventKind::ResetSummary { .. }) {
+                this_mm_event_history.reset();
+            } else {
+                this_mm_event_history.update(this_ev);
+                self.mm_event_history_stat
+                    .update_event(this_ev, &this_mm_event_history);
+            }
+        }
 
         let duration2 = start2.elapsed();
         self.mm_event_history_perf_stat
@@ -395,7 +404,7 @@ where
                 .expect("Marked summary as finalised, but it's not in summary_for_event!")
                 .clone();
 
-            let mm_history = self
+            let mut mm_history = self
                 .mm_event_history_for_event
                 .get(our_event)
                 .expect("Marked summary as finalised, but it's not in mm_event_history_for_event!")
@@ -454,8 +463,9 @@ where
 
             writeln!(
                 summary_log_file,
-                "Current summary: {}\nSchedule cumulative: {}\nOverall cumulative: {}",
-                summary, schedule_cumulative, self.overall_cumulative.1
+                "---------------------------------------------------------------------------------------------------------------------------------------------------------
+                \nOverall cumulative: {}",
+                self.overall_cumulative.1
             )
             .expect("Failed to write to summary log file!");
 
@@ -478,6 +488,8 @@ where
                     .increment_old_event_history_update_time(duration3.as_millis());
 
                 let start4 = Instant::now();
+                self.mm_event_history_stat
+                    .update_state(&mm_history, true, None);
                 let reward = self.mm_event_history_stat.report_reward();
                 let duration4 = start4.elapsed();
                 self.mm_event_history_perf_stat
@@ -493,10 +505,18 @@ where
                 );
                 nemesis.report_reward(&reward_entry, summary_producers);
 
-                writeln!(summary_log_file, "{}", self.mm_event_history_stat).expect("Failed to write MMEventHistoryStat to summary log file!");
-                writeln!(summary_log_file, "{}", self.mm_event_history_perf_stat).expect("Failed to write MMEventHistoryPerfStat to summary log file!");
-                writeln!(summary_log_file, "MMEventHistoryReward[{:.4}]", reward).expect("Failed to write MMEventHistoryReward to summary log file!");
-                writeln!(summary_log_file, "MMEventHistoryGlobalState[{}]", mm_history).expect("Failed to write to summary log file!");
+                writeln!(summary_log_file, "{}", self.mm_event_history_stat)
+                    .expect("Failed to write MMEventHistoryStat to summary log file!");
+                writeln!(summary_log_file, "{}", self.mm_event_history_perf_stat)
+                    .expect("Failed to write MMEventHistoryPerfStat to summary log file!");
+                writeln!(summary_log_file, "MMEventHistoryReward[{:.4}]", reward)
+                    .expect("Failed to write MMEventHistoryReward to summary log file!");
+                writeln!(
+                    summary_log_file,
+                    "\nMMEventHistoryGlobalState[{}]",
+                    mm_history
+                )
+                .expect("Failed to write MMEventHistoryGlobalState to summary log file!");
             }
 
             // Update per-schedule cumulative summary (after reward is computed)

@@ -1,13 +1,11 @@
-/****************************
- * Event pairs and triplets *
- ****************************/
-
 use core::fmt;
 use std::borrow::Cow;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use base64::write;
 use hashbrown::HashMap;
+use siphasher::sip::SipHasher;
 extern crate siphasher;
 
 use crate::event::MonotonicTimestamp;
@@ -33,9 +31,9 @@ pub struct MMEventHistoryStat {
     pub overall_global_mm_states_sum: usize,
     pub overall_per_event_mm_states_sum: usize,
     pub total_distinct_global_mm_states: usize,
-    pub top_hit_global_mm_states: Vec<usize>,
+    pub top_hit_global_mm_states: HashMap<u64, usize>, // hash of MMState -> count
     pub total_distinct_per_event_mm_states: usize,
-    pub top_hit_per_event_mm_states: Vec<usize>,
+    pub top_hit_per_event_mm_states: HashMap<u64, usize>, // hash of MMState -> count
     pub global_mm_states: HashMap<MMState, usize>,
     pub per_event_mm_states: HashMap<EventKind, HashMap<MMState, usize>>,
     pub num_global_mm_states_since_last_reward: usize,
@@ -75,9 +73,9 @@ impl MMEventHistoryStat {
             overall_global_mm_states_sum: 0,
             overall_per_event_mm_states_sum: 0,
             total_distinct_global_mm_states: 0,
-            top_hit_global_mm_states: Vec::new(),
+            top_hit_global_mm_states: HashMap::new(),
             total_distinct_per_event_mm_states: 0,
-            top_hit_per_event_mm_states: Vec::new(),
+            top_hit_per_event_mm_states: HashMap::new(),
             global_mm_states: HashMap::new(),
             per_event_mm_states: HashMap::new(),
             num_global_mm_states_diff_skipped: 0,
@@ -126,13 +124,14 @@ impl MMEventHistoryStat {
                 self.update_state(&mm_event_history, true, None);
             }
 
+            let record_interval = self
+                .mm_state_record_config
+                .per_event_mm_state_record_interval_normal;
             if self.mm_state_record_config.record_per_event_mm_state
                 && event.is_execution()
-                && (self.overall_total_events
-                    % self
-                        .mm_state_record_config
-                        .per_event_mm_state_record_interval_normal
-                    == 0)
+                && ((self.overall_total_events - self.overall_total_message_events)
+                    % record_interval
+                    == record_interval - 1)
             {
                 self.update_state(&mm_event_history, false, Some(&event));
             }
@@ -145,7 +144,7 @@ impl MMEventHistoryStat {
         is_global_state: bool,
         event_kind: Option<&EventKind>,
     ) -> bool {
-        self._update_state(
+        let result = self._update_state(
             &mm_event_history.per_node_events,
             if is_global_state {
                 &mm_event_history.current_global_state
@@ -155,7 +154,23 @@ impl MMEventHistoryStat {
             is_global_state,
             event_kind,
             1,
-        )
+        );
+        if result {
+            log::debug!(
+                "[MMEventHistoryStat] New distinct {} MM state recorded: {}",
+                if is_global_state {
+                    "global"
+                } else {
+                    "per-event"
+                },
+                if is_global_state {
+                    &mm_event_history.current_global_state
+                } else {
+                    &mm_event_history.current_per_event_state
+                },
+            )
+        }
+        return result;
     }
 
     fn _update_state(
@@ -192,6 +207,10 @@ impl MMEventHistoryStat {
                 Cow::Borrowed(mm_state)
             };
 
+        let mut hasher = SipHasher::new_with_keys(0, 0);
+        state_key.as_ref().hash(&mut hasher);
+        let state_hash = hasher.finish();
+
         let (store, total_distinct_count, top_hit_counts, count_since_last_reward) =
             if is_global_state {
                 (
@@ -224,7 +243,8 @@ impl MMEventHistoryStat {
         // `state_key.as_ref()` gives us &MMState, which works with HashMap.
         if let Some(existing_count) = store.get_mut(state_key.as_ref()) {
             *existing_count += count_to_add;
-            Self::insert_record(*existing_count, top_hit_counts);
+
+            Self::insert_record(state_hash, *existing_count, top_hit_counts);
             if is_global_state {
                 self.global_mm_states_hash_hit_count += 1;
             } else {
@@ -262,7 +282,7 @@ impl MMEventHistoryStat {
 
             if let Some((_, existing_count)) = result {
                 *existing_count += count_to_add;
-                Self::insert_record(*existing_count, top_hit_counts);
+                Self::insert_record(state_hash, *existing_count, top_hit_counts);
                 false
             } else {
                 // This is the magic:
@@ -271,7 +291,7 @@ impl MMEventHistoryStat {
                 store.insert(state_key.into_owned(), count_to_add);
                 *total_distinct_count += 1;
                 *count_since_last_reward += 1;
-                Self::insert_record(count_to_add, top_hit_counts);
+                Self::insert_record(state_hash, count_to_add, top_hit_counts);
                 true
             }
         }
@@ -339,12 +359,17 @@ impl MMEventHistoryStat {
                 return (false, true, 0, 0);
             }
             let (diff_vc, diff_mm) = state1.diff_split(state2);
+            let diff_percent = if vc_sum_max + mm_sum_max > 0 {
+                ((diff_vc + diff_mm) as f64 / (vc_sum_max + mm_sum_max) as f64 * 100.0).round()
+                    as u64
+            } else {
+                0
+            };
             return (
                 diff_vc <= thres_vc && diff_mm <= thres_mm,
                 false,
                 diff_vc + diff_mm,
-                ((diff_vc + diff_mm) as f64 / (vc_sum_max + mm_sum_max) as f64 * 100.0).round()
-                    as u64,
+                diff_percent as u64,
             ); // HONGYI TODO: return both diffs?
         }
 
@@ -375,39 +400,32 @@ impl MMEventHistoryStat {
         if sum_min < (sum_max - thres) {
             return (false, true, 0, 0);
         }
+        let diff_percent = if sum_max > 0 {
+            ((sum_max - sum_min) as f64 / sum_max as f64 * 100.0).round() as u64
+        } else {
+            0
+        };
         let diff = state1.diff(state2);
-        (
-            diff <= thres,
-            false,
-            diff,
-            (diff as f64 / sum_max as f64 * 100.0).round() as u64,
-        )
+        (diff <= thres, false, diff, diff_percent)
     }
 
-    fn insert_record(val: usize, top_records: &mut Vec<usize>) {
+    fn insert_record(hash: u64, count: usize, top_records: &mut HashMap<u64, usize>) {
         if top_records.len() < MAX_NUM_TO_DISPLAY {
-            top_records.push(val);
-            top_records.sort_by(|a, b| b.cmp(a)); // Sort in descending order.
+            top_records.insert(hash, count);
             return;
         }
 
-        if val <= *top_records.last().unwrap() {
+        if count <= *top_records.values().min().unwrap() {
             return;
         }
 
-        top_records.push(val);
-        top_records.sort_by(|a, b| b.cmp(a)); // Sort in descending order.
-        if top_records.len() > MAX_NUM_TO_DISPLAY {
-            top_records.pop();
-        }
-    }
-
-    fn insert_global_mm_state_record(&mut self, count: usize) {
-        Self::insert_record(count, &mut self.top_hit_global_mm_states);
-    }
-
-    fn insert_per_event_mm_state_record(&mut self, count: usize) {
-        Self::insert_record(count, &mut self.top_hit_per_event_mm_states);
+        let lowest_key: u64 = top_records
+            .iter()
+            .min_by_key(|&(_, &v)| v)
+            .map(|(&k, _)| k)
+            .unwrap();
+        top_records.insert(hash, count);
+        top_records.remove(&lowest_key);
     }
 
     pub fn print(&self) {
@@ -485,8 +503,19 @@ impl fmt::Display for MMEventHistoryStat {
 
         writeln!(
             f,
+            "overall_per_node_message_events / overall_per_node_events: {:?} / {:?}",
+            self.overall_per_node_message_events, self.overall_per_node_events,
+        )?;
+
+        writeln!(
+            f,
             "overall_global_mm_states_sum_avg: {:.4}",
-            self.overall_global_mm_states_sum as f64 / self.overall_total_global_mm_states as f64,
+            if self.overall_total_global_mm_states > 0 {
+                self.overall_global_mm_states_sum as f64
+                    / self.overall_total_global_mm_states as f64
+            } else {
+                0.0
+            }
         )?;
 
         writeln!(
@@ -495,7 +524,10 @@ impl fmt::Display for MMEventHistoryStat {
             self.total_distinct_global_mm_states, self.overall_total_global_mm_states,
         )?;
 
-        let top_global_mm_states = &self.top_hit_global_mm_states;
+        let top_global_mm_states = &self
+            .top_hit_global_mm_states
+            .values()
+            .collect::<Vec<&usize>>();
         writeln!(f, "top_global_mm_states: {:?}", top_global_mm_states)?;
 
         writeln!(
@@ -542,15 +574,13 @@ impl fmt::Display for MMEventHistoryStat {
 
         writeln!(
             f,
-            "overall_per_node_message_events / overall_per_node_events: {:?} / {:?}",
-            self.overall_per_node_message_events, self.overall_per_node_events,
-        )?;
-
-        writeln!(
-            f,
             "overall_per_event_mm_states_sum_avg: {:.4}",
-            self.overall_per_event_mm_states_sum as f64
-                / self.overall_total_per_event_mm_states as f64,
+            if self.overall_total_per_event_mm_states > 0 {
+                self.overall_per_event_mm_states_sum as f64
+                    / self.overall_total_per_event_mm_states as f64
+            } else {
+                0.0
+            },
         )?;
 
         writeln!(
@@ -559,7 +589,10 @@ impl fmt::Display for MMEventHistoryStat {
             self.total_distinct_per_event_mm_states, self.overall_total_per_event_mm_states,
         )?;
 
-        let top_per_event_mm_states = &self.top_hit_per_event_mm_states;
+        let top_per_event_mm_states = &self
+            .top_hit_per_event_mm_states
+            .values()
+            .collect::<Vec<&usize>>();
         writeln!(f, "top_per_event_mm_states: {:?}", top_per_event_mm_states)?;
 
         writeln!(
@@ -761,12 +794,7 @@ impl MMEventHistory {
     // }
 
     pub fn update(&mut self, new_event: &LamportEvent) {
-        if let Some(ev_kind) = EventKind::from_event(new_event) {
-            if !ev_kind.is_message_event() && !ev_kind.is_execution() {
-                self.reset();
-                return;
-            }
-
+        if let Some(_) = EventKind::from_event(new_event) {
             let proc = new_event.proc();
             let ts = new_event.ts();
             self._merge_update_ts(proc, ts);
@@ -790,6 +818,9 @@ impl MMEventHistory {
                 .merge(&other.current_per_event_state);
         }
         self._merge_update_ts(other_event.proc(), other_event.ts());
+        for (i, count) in self.per_node_events.iter_mut().enumerate() {
+            *count = (*count).max(other.per_node_events[i]);
+        }
     }
 
     pub fn union(&mut self, other: &Self) {

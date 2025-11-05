@@ -322,7 +322,7 @@ impl fmt::Display for EventKind {
 }
 
 impl EventKind {
-    fn from_event(event: &LamportEvent) -> Option<EventKind> {
+    pub fn from_event(event: &LamportEvent) -> Option<EventKind> {
         match event.bare_event() {
             Event::BlockExecute { block_id, .. } => Some(EventKind::BlockExecute {
                 block_id: *block_id,
@@ -576,6 +576,16 @@ impl Hash for MMState {
     }
 }
 
+impl fmt::Display for MMState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "MMState:")?;
+        writeln!(f, "  VC Sum: {}", self.vc_sum)?;
+        writeln!(f, "  MM Sum: {}", self.mm_sum)?;
+        writeln!(f, "  VC: {:?}", self.vc)?;
+        writeln!(f, "  MM: {:?}", self.mm)
+    }
+}
+
 impl MMState {
     pub fn from_config(mm_config: Arc<MMConfig>) -> Self {
         let num_nodes = mm_config.num_nodes;
@@ -822,6 +832,11 @@ impl MMState {
         (diff_vc, diff_mm)
     }
 
+    fn recalc_sums(&mut self) {
+        self.vc_sum = self.vc.sum();
+        self.mm_sum = self.mm.sum();
+    }
+
     pub fn merge(&mut self, other: &MMState) {
         assert!(
             self.has_same_config(other),
@@ -840,6 +855,7 @@ impl MMState {
             .for_each(|elem_a, elem_b| {
                 *elem_a = std::cmp::max(*elem_a, *elem_b);
             });
+        self.recalc_sums();
         self.has_changed.set(true);
     }
 
