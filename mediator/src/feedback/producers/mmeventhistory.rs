@@ -30,6 +30,8 @@ pub struct MMEventHistoryStat {
     pub overall_per_node_message_events: Vec<usize>,
     pub overall_total_global_mm_states: usize,
     pub overall_total_per_event_mm_states: usize,
+    pub overall_global_mm_states_sum: usize,
+    pub overall_per_event_mm_states_sum: usize,
     pub total_distinct_global_mm_states: usize,
     pub top_hit_global_mm_states: Vec<usize>,
     pub total_distinct_per_event_mm_states: usize,
@@ -46,8 +48,8 @@ pub struct MMEventHistoryStat {
     pub per_event_mm_states_diff_count: usize,
     pub global_mm_states_hash_hit_count: usize,
     pub per_event_mm_states_hash_hit_count: usize,
-    pub global_mm_states_diff_ratio_sum: f64,
-    pub per_event_mm_states_diff_ratio_sum: f64,
+    pub global_mm_states_diff_percent_sum: usize,
+    pub per_event_mm_states_diff_percent_sum: usize,
     pub global_mm_config: Arc<MMConfig>,
     pub per_event_mm_config: Arc<MMConfig>,
     pub similarity_config: Arc<SimilarityConfig>,
@@ -70,6 +72,8 @@ impl MMEventHistoryStat {
             overall_per_node_message_events: vec![0; global_mm_config.num_nodes],
             overall_total_global_mm_states: 0,
             overall_total_per_event_mm_states: 0,
+            overall_global_mm_states_sum: 0,
+            overall_per_event_mm_states_sum: 0,
             total_distinct_global_mm_states: 0,
             top_hit_global_mm_states: Vec::new(),
             total_distinct_per_event_mm_states: 0,
@@ -84,8 +88,8 @@ impl MMEventHistoryStat {
             per_event_mm_states_diff_count: 0,
             global_mm_states_hash_hit_count: 0,
             per_event_mm_states_hash_hit_count: 0,
-            global_mm_states_diff_ratio_sum: 0.0,
-            per_event_mm_states_diff_ratio_sum: 0.0,
+            global_mm_states_diff_percent_sum: 0,
+            per_event_mm_states_diff_percent_sum: 0,
             num_global_mm_states_since_last_reward: 0,
             num_per_event_mm_states_since_last_reward: 0,
             global_mm_config: global_mm_config.clone(),
@@ -163,6 +167,15 @@ impl MMEventHistoryStat {
         count_to_add: usize,
     ) -> bool {
         // returns true if a new distinct state is added
+
+        if is_global_state {
+            self.overall_total_global_mm_states += 1;
+            self.overall_global_mm_states_sum += (mm_state.mm_sum + mm_state.vc_sum) as usize;
+        } else {
+            self.overall_total_per_event_mm_states += 1;
+            self.overall_per_event_mm_states_sum += (mm_state.mm_sum + mm_state.vc_sum) as usize;
+        }
+
         let mm_config = if is_global_state {
             self.global_mm_config.clone()
         } else {
@@ -237,11 +250,11 @@ impl MMEventHistoryStat {
                     if is_global_state {
                         self.global_mm_states_diff_sum += comparision_result.2 as usize;
                         self.global_mm_states_diff_count += 1;
-                        self.global_mm_states_diff_ratio_sum += comparision_result.3;
+                        self.global_mm_states_diff_percent_sum += comparision_result.3 as usize;
                     } else {
                         self.per_event_mm_states_diff_sum += comparision_result.2 as usize;
                         self.per_event_mm_states_diff_count += 1;
-                        self.per_event_mm_states_diff_ratio_sum += comparision_result.3;
+                        self.per_event_mm_states_diff_percent_sum += comparision_result.3 as usize;
                     }
                 };
                 comparision_result.0
@@ -270,8 +283,8 @@ impl MMEventHistoryStat {
         is_global_state: bool,
         mm_config: Arc<MMConfig>,
         similarity_config: Arc<SimilarityConfig>,
-    ) -> (bool, bool, u64, f64) {
-        // (is_similar, skipped_diff, diff, diff_ratio)
+    ) -> (bool, bool, u64, u64) {
+        // (is_similar, skipped_diff, diff, diff_percent)
         let use_absolute_threshold = similarity_config.mm_use_absolute_similarity_threshold;
         let (vc_sum1, mm_sum1) = (state1.vc_sum as u64, state1.mm_sum as u64);
         let (vc_sum2, mm_sum2) = (state2.vc_sum as u64, state2.mm_sum as u64);
@@ -323,14 +336,15 @@ impl MMEventHistoryStat {
                 }
             };
             if vc_sum_min < (vc_sum_max - thres_vc) || mm_sum_min < (mm_sum_max - thres_mm) {
-                return (false, true, 0, 0.0);
+                return (false, true, 0, 0);
             }
             let (diff_vc, diff_mm) = state1.diff_split(state2);
             return (
                 diff_vc <= thres_vc && diff_mm <= thres_mm,
                 false,
                 diff_vc + diff_mm,
-                (diff_vc + diff_mm) as f64 / (vc_sum_max + mm_sum_max) as f64,
+                ((diff_vc + diff_mm) as f64 / (vc_sum_max + mm_sum_max) as f64 * 100.0).round()
+                    as u64,
             ); // HONGYI TODO: return both diffs?
         }
 
@@ -359,10 +373,15 @@ impl MMEventHistoryStat {
             }
         };
         if sum_min < (sum_max - thres) {
-            return (false, true, 0, 0.0);
+            return (false, true, 0, 0);
         }
         let diff = state1.diff(state2);
-        (diff <= thres, false, diff, diff as f64 / sum_max as f64)
+        (
+            diff <= thres,
+            false,
+            diff,
+            (diff as f64 / sum_max as f64 * 100.0).round() as u64,
+        )
     }
 
     fn insert_record(val: usize, top_records: &mut Vec<usize>) {
@@ -410,7 +429,8 @@ impl MMEventHistoryStat {
         let cool_down_factor: f64 = if (self.mm_reward_config.use_cool_down_factor
             && self.mm_reward_config.cool_down_threshold > self.overall_total_global_mm_states)
         {
-            (self.overall_total_global_mm_states as f64).min(self.mm_reward_config.cool_down_threshold as f64)
+            (self.overall_total_global_mm_states as f64)
+                .min(self.mm_reward_config.cool_down_threshold as f64)
                 / self.mm_reward_config.cool_down_threshold as f64 // Not to favour early rewards too much
         } else {
             1.0
@@ -443,7 +463,7 @@ impl RewardFunction for MMEventHistoryStat {
     ) -> crate::feedback::reward::RewardEntry {
         let reward_value = _current.report_reward();
         crate::feedback::reward::RewardEntry::new(
-            crate::feedback::producers::SummaryProducerIdentifier::MMEventHistory,
+            crate::feedback::producers::SummaryProducerIdentifier::EventHistory,
             task,
             reward_value,
         )
@@ -455,15 +475,18 @@ impl fmt::Display for MMEventHistoryStat {
         writeln!(f, "MMEventHistory[")?;
 
         // Global State Statistics
-        writeln!(
-            f,
-            "GLOBAL_STATE_STATISTICS:"
-        )?;
+        writeln!(f, "GLOBAL_STATE_STATISTICS:")?;
 
         writeln!(
             f,
             "overall_total_message_events / overall_total_events: {} / {}",
             self.overall_total_message_events, self.overall_total_events,
+        )?;
+
+        writeln!(
+            f,
+            "overall_global_mm_states_sum_avg: {:.4}",
+            self.overall_global_mm_states_sum as f64 / self.overall_total_global_mm_states as f64,
         )?;
 
         writeln!(
@@ -505,23 +528,29 @@ impl fmt::Display for MMEventHistoryStat {
 
         writeln!(
             f,
-            "global_mm_states_diff_ratio_avg: {:.4}",
+            "global_mm_states_diff_percent_avg: {:.4}%",
             if self.global_mm_states_diff_count > 0 {
-                self.global_mm_states_diff_ratio_sum / self.global_mm_states_diff_count as f64
+                self.global_mm_states_diff_percent_sum as f64
+                    / self.global_mm_states_diff_count as f64
             } else {
                 0.0
             }
         )?;
 
         // Per-Event State Statistics
-        writeln!(f,
-            "PER_EVENT_STATE_STATISTICS:"
-        )?;
+        writeln!(f, "PER_EVENT_STATE_STATISTICS:")?;
 
         writeln!(
             f,
             "overall_per_node_message_events / overall_per_node_events: {:?} / {:?}",
             self.overall_per_node_message_events, self.overall_per_node_events,
+        )?;
+
+        writeln!(
+            f,
+            "overall_per_event_mm_states_sum_avg: {:.4}",
+            self.overall_per_event_mm_states_sum as f64
+                / self.overall_total_per_event_mm_states as f64,
         )?;
 
         writeln!(
@@ -564,9 +593,10 @@ impl fmt::Display for MMEventHistoryStat {
 
         writeln!(
             f,
-            "per_event_mm_states_diff_ratio_avg: {:.4}",
+            "per_event_mm_states_diff_percent_avg: {:.4}%",
             if self.per_event_mm_states_diff_count > 0 {
-                self.per_event_mm_states_diff_ratio_sum / self.per_event_mm_states_diff_count as f64
+                self.per_event_mm_states_diff_percent_sum as f64
+                    / self.per_event_mm_states_diff_count as f64
             } else {
                 0.0
             }
@@ -656,6 +686,27 @@ pub struct MMEventHistory {
     #[cfg(feature = "selfcheck")]
     /// For debugging purposes.
     pub last_reset: HashMap<ProcessId, (ScheduleId, StepId)>,
+}
+
+impl std::hash::Hash for MMEventHistory {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.current_global_state.hash(state);
+        if self.mm_state_record_config.record_per_event_mm_state {
+            self.current_per_event_state.hash(state);
+        }
+    }
+}
+
+impl fmt::Display for MMEventHistory {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(
+            f,
+            "Current event sum: {}",
+            self.per_node_events.iter().sum::<usize>()
+        )?;
+        writeln!(f, "Current per_node_events: {:?}", self.per_node_events)?;
+        Ok(())
+    }
 }
 
 impl MMEventHistory {

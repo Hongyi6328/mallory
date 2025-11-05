@@ -38,7 +38,6 @@ pub enum SummaryProducerIdentifier {
     AFLBranchFeedback,
     #[default]
     Unspecified,
-    MMEventHistory,
 }
 
 pub trait SummaryProducer {

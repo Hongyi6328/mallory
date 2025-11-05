@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{File, OpenOptions};
+use std::hash::Hash;
 use std::io::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::hash::Hasher;
 
 use enum_dispatch::enum_dispatch;
 use hashbrown::hash_map::Entry;
@@ -14,6 +16,7 @@ use petgraph::stable_graph::{DefaultIx, NodeIndex, StableGraph};
 use petgraph::{visit::EdgeRef, Directed};
 
 use chrono::{TimeZone, Utc};
+use siphasher::sip::SipHasher;
 
 use crate::event::{AdministrativeEvent, Event, LamportEvent, MonotonicTimestamp, ProcessId};
 use crate::feedback::producers::mmeventhistory::{
@@ -27,7 +30,7 @@ use crate::CFG;
 
 // This seems needed by the `enum_dispatch` macro
 use crate::feedback::producers::{AFLBranchFeedback, EventCount, EventHistory, VectorClock};
-use crate::nemesis::schedules::{ScheduleId, StepId};
+use crate::nemesis::schedules::{ScheduleId, StateId, StepId};
 
 use super::producers::{SummaryKind, SummaryProducer, SummaryProducerIdentifier};
 use super::reward::RewardFunction;
@@ -291,18 +294,9 @@ where
             .mm_event_history_for_event
             .get_mut(this_ev)
             .expect("Missing MMEventHistory for dependency!");
-
-        if matches!(
-            this_ev.bare_event(),
-            Event::TimelineEvent(AdministrativeEvent::CollateSummaries { .. })
-        ) {
-            self.mm_event_history_stat
-                .update_state(&this_mm_event_history, true, None);
-        } else {
-            this_mm_event_history.update(this_ev);
-            self.mm_event_history_stat
+        self.mm_event_history_stat
                 .update_event(this_ev, &this_mm_event_history);
-        }
+
         let duration2 = start2.elapsed();
         self.mm_event_history_perf_stat
             .increment_mm_event_history_update_time(duration2.as_millis());
@@ -401,6 +395,12 @@ where
                 .expect("Marked summary as finalised, but it's not in summary_for_event!")
                 .clone();
 
+            let mm_history = self
+                .mm_event_history_for_event
+                .get(our_event)
+                .expect("Marked summary as finalised, but it's not in mm_event_history_for_event!")
+                .clone();
+
             // let mut mm_history = self
             //     .mm_event_history_for_event
             //     .get(our_event)
@@ -459,8 +459,6 @@ where
             )
             .expect("Failed to write to summary log file!");
 
-            writeln!(summary_log_file, "{}", self.mm_event_history_stat,);
-
             // Compute and rewards to Nemesis
             let schedule_window_summaries =
                 self.stored_summaries.entry(task.schedule_id).or_default();
@@ -485,12 +483,20 @@ where
                 self.mm_event_history_perf_stat
                     .increment_mm_event_history_update_time(duration4.as_millis());
 
-                let reward_entry = RewardEntry::new(
-                    SummaryProducerIdentifier::MMEventHistory,
+                let mut hasher = SipHasher::new_with_keys(0, 0);
+                mm_history.hash(&mut hasher);
+                let reward_entry = RewardEntry::new_with_post_state(
+                    SummaryProducerIdentifier::EventHistory,
                     task.clone(),
+                    hasher.finish() as StateId,
                     reward,
                 );
                 nemesis.report_reward(&reward_entry, summary_producers);
+
+                writeln!(summary_log_file, "{}", self.mm_event_history_stat).expect("Failed to write MMEventHistoryStat to summary log file!");
+                writeln!(summary_log_file, "{}", self.mm_event_history_perf_stat).expect("Failed to write MMEventHistoryPerfStat to summary log file!");
+                writeln!(summary_log_file, "MMEventHistoryReward[{:.4}]", reward).expect("Failed to write MMEventHistoryReward to summary log file!");
+                writeln!(summary_log_file, "MMEventHistoryGlobalState[{}]", mm_history).expect("Failed to write to summary log file!");
             }
 
             // Update per-schedule cumulative summary (after reward is computed)

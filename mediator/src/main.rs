@@ -152,6 +152,8 @@ fn start_test(data: Form<TestStart>) {
     let mut store_path = run.store_path.write();
     *store_path = data.store_path.clone();
 
+    copy_config_file_to_store();
+
     let ts = data.start_time.clone();
     let dt = DateTime::parse_from_rfc3339(&ts).unwrap();
     let dt_utc: DateTime<Utc> = DateTime::from_utc(dt.naive_utc(), Utc);
@@ -1055,12 +1057,13 @@ fn setup_history(feedback_type: &String) {
 fn copy_config_file_to_store() {
     let config_src = "Mediator.toml";
     let history = HISTORY.get();
-    let path_base = history.dump();
+    let path_base = history.store_path.read().clone();
     let config_dst = Path::new(&path_base).join("Mediator.toml");
     match std::fs::copy(config_src, config_dst) {
-        Ok(_) => log::info!("[SAVE] Copied configuration file to run directory."),
+        Ok(_) => log::info!("[SAVE] Copied configuration file to {}/Mediator.toml", path_base),
         Err(e) => log::warn!(
-            "[SAVE] Could not copy configuration file to run directory: {}",
+            "[SAVE] Could not copy configuration file to {}/Mediator.toml: {}",
+            path_base,
             e
         ),
     }
@@ -1150,8 +1153,6 @@ async fn main() -> Result<(), rocket::Error> {
     setup_logging().expect("could not set up logging");
     let mut nfqueue = setup_networking().expect("could not set up networking");
     setup_history(feedback_type);
-
-    copy_config_file_to_store();
 
     // Restore firewall rules to their initial state upon Ctrl + C or at normal program exit
     ctrlc::set_handler(move || {
