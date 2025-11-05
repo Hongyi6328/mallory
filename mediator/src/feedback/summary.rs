@@ -16,14 +16,9 @@ use petgraph::{visit::EdgeRef, Directed};
 use chrono::{TimeZone, Utc};
 
 use crate::event::{AdministrativeEvent, Event, LamportEvent, MonotonicTimestamp, ProcessId};
-use crate::feedback::producers::mmeventhistory::{
-    MMEventHistory, MMEventHistoryPerfStat, MMEventHistoryStat,
-};
-use crate::feedback::reward::RewardEntry;
 use crate::history::time::ClockManager;
 use crate::history::timeline::CommitManager;
 use crate::nemesis::AdaptiveNemesis;
-use crate::CFG;
 
 // This seems needed by the `enum_dispatch` macro
 use crate::feedback::producers::{AFLBranchFeedback, EventCount, EventHistory, VectorClock};
@@ -62,18 +57,8 @@ pub struct SummaryWrapper<T: SummaryProducer + Clone> {
     // - we can remove the summary for an event once its dependants
     //   have been processed, i.e. once all causal links originating
     //   from that event have been traversed.
+
     state_similarity_threshold: f64,
-
-    use_old_event_summary: bool,
-
-    mm_event_history_stat: MMEventHistoryStat,
-
-    mm_event_history_perf_stat: MMEventHistoryPerfStat,
-
-    mm_event_history_for_event: HashMap<LamportEvent, MMEventHistory>,
-    // stored_mm_event_histories: HashMap<ScheduleId, HashMap<StepId, MMEventHistory>>,
-
-    // per_schedule_cumulative_mm_event_history: HashMap<ScheduleId, MMEventHistory>,
 }
 
 impl<T> SummaryWrapper<T>
@@ -110,18 +95,6 @@ where
             shiviz_log_file,
             summary_log_filename,
             state_similarity_threshold,
-
-            // NEW MM STUFF
-            use_old_event_summary: CFG.get().use_old_summary_kinds,
-            mm_event_history_stat: MMEventHistoryStat::new(
-                CFG.get().global_mm_config.clone(),
-                CFG.get().per_event_mm_config.clone(),
-                CFG.get().similarity_config.clone(),
-                CFG.get().record_config.clone(),
-                CFG.get().reward_config.clone(),
-            ),
-            mm_event_history_perf_stat: MMEventHistoryPerfStat::new(),
-            mm_event_history_for_event: HashMap::new(),
         }
     }
 
@@ -138,12 +111,7 @@ where
 
             if let Some(last_summary) = self.per_schedule_cumulative.get(&last_schedule_id) {
                 self.overall_cumulative.0 = current_schedule_id - 1;
-
-                let start = Instant::now();
                 self.overall_cumulative.1.union(last_summary);
-                let duration = start.elapsed();
-                self.mm_event_history_perf_stat
-                    .increment_old_event_history_update_time(duration.as_millis());
             } else {
                 panic!(
                     "[SUMMARY] No cumulative summary for past schedule {}! Cannot update overall cumulative!",
@@ -160,12 +128,6 @@ where
 
         self.per_schedule_cumulative
             .drain_filter(|&sid, _| sid < two_behind);
-
-        // self.stored_mm_event_histories
-        //     .drain_filter(|&sid, _| sid < two_behind);
-
-        // self.per_schedule_cumulative_mm_event_history
-        //     .drain_filter(|&sid, _| sid < two_behind);
     }
 }
 
@@ -203,49 +165,17 @@ where
     T: SummaryProducer + RewardFunction + Clone + fmt::Display,
 {
     fn initialize(&mut self, ev: &LamportEvent) {
-        let start1 = Instant::now();
         self.summary_for_event.insert(ev.clone(), T::new());
-        let duration1 = start1.elapsed();
-        self.mm_event_history_perf_stat
-            .increment_old_event_history_update_time(duration1.as_millis());
-
-        let start2 = Instant::now();
-        self.mm_event_history_for_event.insert(
-            ev.clone(),
-            MMEventHistory::new(
-                CFG.get().record_config.clone(),
-                CFG.get().global_mm_config.clone(),
-                CFG.get().per_event_mm_config.clone(),
-            ),
-        );
-        let duration2 = start2.elapsed();
-        self.mm_event_history_perf_stat
-            .increment_mm_event_history_update_time(duration2.as_millis());
     }
 
     fn copy(&mut self, pred_ev: &LamportEvent, this_ev: &LamportEvent) {
-        let start1 = Instant::now();
         let this_summary = self
             .summary_for_event
             .get(pred_ev)
             .expect("Missing summary for dependency!")
             .clone();
-        self.summary_for_event.insert(this_ev.clone(), this_summary);
-        let duration1 = start1.elapsed();
-        self.mm_event_history_perf_stat
-            .increment_old_event_history_update_time(duration1.as_millis());
 
-        let start2 = Instant::now();
-        let this_mm_event_history = self
-            .mm_event_history_for_event
-            .get(pred_ev)
-            .expect("Missing MMEventHistory for dependency!")
-            .clone();
-        self.mm_event_history_for_event
-            .insert(this_ev.clone(), this_mm_event_history);
-        let duration2 = start2.elapsed();
-        self.mm_event_history_perf_stat
-            .increment_mm_event_history_update_time(duration2.as_millis());
+        self.summary_for_event.insert(this_ev.clone(), this_summary);
     }
 
     fn take_ownership(&mut self, pred_ev: &LamportEvent, this_ev: &LamportEvent) {
@@ -253,14 +183,8 @@ where
             .summary_for_event
             .remove(pred_ev)
             .expect("Missing summary for dependency!");
-        self.summary_for_event.insert(this_ev.clone(), this_summary);
 
-        let this_mm_event_history = self
-            .mm_event_history_for_event
-            .remove(pred_ev)
-            .expect("Missing MMEventHistory for dependency!");
-        self.mm_event_history_for_event
-            .insert(this_ev.clone(), this_mm_event_history);
+        self.summary_for_event.insert(this_ev.clone(), this_summary);
     }
 
     fn update(&mut self, this_ev: &LamportEvent, state_similarity_threshold: f64) {
@@ -270,11 +194,7 @@ where
             .expect("Missing summary for dependency!");
 
         let pred_str = format!("{}", this_summary);
-        let start1 = Instant::now();
         this_summary.update(this_ev, state_similarity_threshold);
-        let duration1 = start1.elapsed();
-        self.mm_event_history_perf_stat
-            .increment_old_event_history_update_time(duration1.as_millis());
         let new_str = format!("{}", this_summary);
 
         log::debug!(
@@ -285,27 +205,6 @@ where
         );
 
         self.last_summarised_event.replace(this_ev.clone());
-
-        let start2 = Instant::now();
-        let this_mm_event_history = self
-            .mm_event_history_for_event
-            .get_mut(this_ev)
-            .expect("Missing MMEventHistory for dependency!");
-
-        if matches!(
-            this_ev.bare_event(),
-            Event::TimelineEvent(AdministrativeEvent::CollateSummaries { .. })
-        ) {
-            self.mm_event_history_stat
-                .update_state(&this_mm_event_history, true, None);
-        } else {
-            this_mm_event_history.update(this_ev);
-            self.mm_event_history_stat
-                .update_event(this_ev, &this_mm_event_history);
-        }
-        let duration2 = start2.elapsed();
-        self.mm_event_history_perf_stat
-            .increment_mm_event_history_update_time(duration2.as_millis());
     }
 
     fn merge_into(&mut self, pred_ev: &LamportEvent, this_ev: &LamportEvent) {
@@ -331,13 +230,7 @@ where
 
         let dep_str = format!("{}", dep_summary);
         let this_str = format!("{}", this_summary);
-
-        let start1 = Instant::now();
         this_summary.merge(this_ev, dep_summary, pred_ev);
-        let duration1 = start1.elapsed();
-        self.mm_event_history_perf_stat
-            .increment_old_event_history_update_time(duration1.as_millis());
-
         self.last_summarised_event.replace(this_ev.clone());
 
         let new_str = format!("{}", this_summary);
@@ -347,17 +240,6 @@ where
             this_str,
             new_str
         );
-
-        let histories = self
-            .mm_event_history_for_event
-            .get_many_mut([pred_ev, this_ev]);
-        let [dep_history, this_history] = histories.unwrap();
-
-        let start2 = Instant::now();
-        this_history.merge(this_ev, dep_history, pred_ev);
-        let duration2 = start2.elapsed();
-        self.mm_event_history_perf_stat
-            .increment_mm_event_history_update_time(duration2.as_millis());
     }
 
     fn contains_summary_of(&self, ev: &LamportEvent) -> bool {
@@ -367,7 +249,6 @@ where
     fn remove_summary(&mut self, ev: &LamportEvent) {
         if let Some(summary) = self.summary_for_event.remove(ev) {
             log::debug!("[CLEANUP] Removed summary for {}: {}", ev, summary);
-            self.mm_event_history_for_event.remove(ev);
         }
     }
 
@@ -401,38 +282,11 @@ where
                 .expect("Marked summary as finalised, but it's not in summary_for_event!")
                 .clone();
 
-            // let mut mm_history = self
-            //     .mm_event_history_for_event
-            //     .get(our_event)
-            //     .expect("Marked MMEventHistory as finalised, but it's not in mm_event_history_for_event!")
-            //     .clone();
-            // HONGYI TODO: Doesn't seem necessary to clone MMEventHistory here.
-
-            // Log MMEventHistory stats
-
             let schedule_id = task.schedule_id;
-
-            let start1 = Instant::now();
             let schedule_cumulative = self
                 .per_schedule_cumulative
                 .entry(schedule_id)
                 .or_insert_with(T::new);
-            let duration1 = start1.elapsed();
-            self.mm_event_history_perf_stat
-                .increment_old_event_history_update_time(duration1.as_millis());
-
-            // let start2 = Instant::now();
-            // let schedule_cumulative_mm_event_history = self
-            //     .per_schedule_cumulative_mm_event_history
-            //     .entry(schedule_id)
-            //     .or_insert_with(|| MMEventHistory::new(
-            //         CFG.get().record_config.clone(),
-            //         CFG.get().global_mm_config.clone(),
-            //         CFG.get().per_event_mm_config.clone(),
-            //     ));
-            // let duration2 = start2.elapsed();
-            // self.mm_event_history_perf_stat.increment_mm_event_history_update_time(duration2.as_millis());
-            // HONGYI TODO: Doesn't seem necessary to get per-schedule cumulative MMEventHistory here.
 
             let latency = ClockManager::utc_now() - Utc.timestamp_nanos(task.end_ts);
             log::info!(
@@ -459,15 +313,12 @@ where
             )
             .expect("Failed to write to summary log file!");
 
-            writeln!(summary_log_file, "{}", self.mm_event_history_stat,);
-
             // Compute and rewards to Nemesis
             let schedule_window_summaries =
                 self.stored_summaries.entry(task.schedule_id).or_default();
             let state_similarity_threshold = self.state_similarity_threshold;
             if let Some(nemesis) = nemesis {
-                let start3 = Instant::now();
-                T::reward_function(
+                let reward = T::reward_function(
                     task.clone(),
                     &self.overall_cumulative.1,
                     schedule_cumulative,
@@ -475,34 +326,17 @@ where
                     &mut summary,
                     state_similarity_threshold,
                 );
-                let duration3 = start3.elapsed();
-                self.mm_event_history_perf_stat
-                    .increment_old_event_history_update_time(duration3.as_millis());
-
-                let start4 = Instant::now();
-                let reward = self.mm_event_history_stat.report_reward();
-                let duration4 = start4.elapsed();
-                self.mm_event_history_perf_stat
-                    .increment_mm_event_history_update_time(duration4.as_millis());
-
-                let reward_entry = RewardEntry::new(
-                    SummaryProducerIdentifier::MMEventHistory,
-                    task.clone(),
-                    reward,
-                );
-                nemesis.report_reward(&reward_entry, summary_producers);
+                nemesis.report_reward(&reward, summary_producers);
             }
 
             // Update per-schedule cumulative summary (after reward is computed)
             schedule_cumulative.union(&summary);
-            // HONGYI TODO: update MMEventHistory per-schedule cumulative, necessary?
 
             // Actually store the summary
             self.stored_summaries
                 .entry(task.schedule_id)
                 .or_default()
                 .insert(task.step_id, summary);
-            // HONGYI TODO: update MMEventHistory per-schedule cumulative, necessary?
 
             // Update overall cumulative summary, if necessary
             self.maintain_overall_cumulative(schedule_id);
@@ -605,16 +439,8 @@ impl SummaryManager {
                 state_similarity_threshold,
             ))],
             "afl_branch_and_event_history" => vec![
-                SummaryKind::AFLBranchFeedback(SummaryWrapper::new(
-                    event_log_filename,
-                    None,
-                    state_similarity_threshold,
-                )),
-                SummaryKind::EventHistory(SummaryWrapper::new(
-                    event_log_filename,
-                    None,
-                    state_similarity_threshold,
-                )),
+                SummaryKind::AFLBranchFeedback(SummaryWrapper::new(event_log_filename, None, state_similarity_threshold)),
+                SummaryKind::EventHistory(SummaryWrapper::new(event_log_filename, None, state_similarity_threshold)),
             ],
             _ => panic!("Unknown feedback type: {}", feedback_type),
         };
@@ -628,7 +454,7 @@ impl SummaryManager {
                 // So only use EventHistory as feedback with two summaries.
                 SummaryProducerIdentifier::EventHistory,
             ],
-
+            
             _ => panic!("Unknown feedback type: {}", feedback_type),
         };
 

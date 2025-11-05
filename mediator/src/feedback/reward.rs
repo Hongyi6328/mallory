@@ -9,7 +9,7 @@ use crate::nemesis::schedules::{ActionId, ScheduleId, SchedulerIdentifier, State
 use super::producers::SummaryProducerIdentifier;
 
 // History summaries
-pub type RewardValue = f64;
+pub type RewardValue = i32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SummaryTask {
@@ -60,7 +60,7 @@ impl SummaryTask {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RewardEntry {
     pub producer: SummaryProducerIdentifier,
     pub scheduler: SchedulerIdentifier,
@@ -130,6 +130,6 @@ where
         _current: &mut Self,
         _state_similarity_threshold: f64,
     ) -> RewardEntry {
-        RewardEntry::new(SummaryProducerIdentifier::default(), task, 0.0)
+        RewardEntry::new(SummaryProducerIdentifier::default(), task, 0)
     }
 }
