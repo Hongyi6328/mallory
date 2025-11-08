@@ -518,8 +518,20 @@ impl fmt::Display for MMEventHistoryStat {
 
         writeln!(
             f,
-            "overall_per_node_message_events / overall_per_node_local_events / overall_per_node_events: {:?} / {:?} / {:?}",
-            self.overall_per_node_message_events, self.overall_per_node_local_events, self.overall_per_node_events,
+            "overall_per_node_events: {:?}",
+            self.overall_per_node_events
+        )?;
+
+        writeln!(
+            f,
+            "overall_per_node_message_events: {:?}",
+            self.overall_per_node_message_events
+        )?;
+
+        writeln!(
+            f,
+            "overall_per_node_local_events: {:?}",
+            self.overall_per_node_local_events
         )?;
 
         let (overall_avg_message_events, overall_avg_local_events, overall_avg_events) =
@@ -879,7 +891,11 @@ impl MMEventHistory {
         if self.mm_state_record_config.record_per_event_mm_state {
             self.current_per_event_state.reset();
         }
+
         self.per_node_events = vec![0; self.num_nodes];
+        self.per_node_message_events = vec![0; self.num_nodes];
+        self.per_node_local_events = vec![0; self.num_nodes];
+
         self.v_ts.clear();
         log::debug!("[MMEventHistory] ResetSummary.")
     }
@@ -892,7 +908,7 @@ impl MMEventHistory {
     // }
 
     pub fn update(&mut self, new_event: &LamportEvent) {
-        if let Some(_) = EventKind::from_event(new_event) {
+        if let Some(event_kind) = EventKind::from_event(new_event) {
             let proc = new_event.proc();
             let ts = new_event.ts();
             self._merge_update_ts(proc, ts);
@@ -906,6 +922,11 @@ impl MMEventHistory {
             }
 
             self.per_node_events[proc as usize] += 1;
+            if event_kind.is_message_event() {
+                self.per_node_message_events[proc as usize] += 1;
+            } else if event_kind.is_execution() {
+                self.per_node_local_events[proc as usize] += 1;
+            }
         }
     }
 
@@ -918,6 +939,12 @@ impl MMEventHistory {
         self._merge_update_ts(other_event.proc(), other_event.ts());
         for (i, count) in self.per_node_events.iter_mut().enumerate() {
             *count = (*count).max(other.per_node_events[i]);
+        }
+        for (i, count) in self.per_node_message_events.iter_mut().enumerate() {
+            *count = (*count).max(other.per_node_message_events[i]);
+        }
+        for (i, count) in self.per_node_local_events.iter_mut().enumerate() {
+            *count = (*count).max(other.per_node_local_events[i]);
         }
     }
 

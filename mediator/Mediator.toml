@@ -35,8 +35,10 @@ num_nodes = 7
 symmetry_reduction_scheme = "None"  # Options: "None", "Sort", "Merge"
                                     # "Merge" is not implemented yet
 categorize_message_by_data = true
-use_old_summary_for_reward = true
-use_capped_event_count = true
+
+# CHECK THIS !!!                                                                            !!!
+use_old_summary_for_reward = false
+use_capped_event_count = false
 local_event_count_cap = 3
 message_event_count_cap = 2
 
@@ -92,7 +94,7 @@ mm_event_history_per_event_similarity_threshold_mm = 0.3
 # [record_config]
 record_global_mm_state_only_on_reward_reporting = true
 global_mm_state_record_interval = 100
-record_per_event_mm_state = false
+record_per_event_mm_state = true # CHECK THIS                                                                    !!!
 per_event_mm_state_record_interval_normal = 50
 per_event_mm_state_record_interval_special = 100 # Not used yet
 special_event_threshold = 20 # Not used yet
