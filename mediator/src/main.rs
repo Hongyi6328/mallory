@@ -9,8 +9,8 @@ mod nemesis;
 mod net;
 
 use crate::feedback::producers::{
-    MMConfig, MMEventKindMapper, MMRewardConfig, MMStateRecordConfig, SimilarityConfig,
-    SymmetryReductionScheme, EventKindConfig, PartitionScheme
+    EventKindConfig, MMConfig, MMEventKindMapper, MMRewardConfig, MMStateRecordConfig,
+    PartitionScheme, SimilarityConfig, SymmetryReductionScheme,
 };
 use crate::feedback::reward;
 use crate::history::time::{AbsoluteTimestamp, ClockManager, UnsourcedMonotonicTimestamp};
@@ -804,8 +804,11 @@ fn read_configuration(
             "Merge" => SymmetryReductionScheme::Merge,
             _ => return Err("Invalid symmetry_reduction_scheme".into()),
         };
-    let categorize_message_by_data = settings.get("categorize_message_by_data")?;
-    let use_old_summary_for_reward: bool = settings.get("use_old_summary_for_reward")?;
+    let categorize_message_by_data: bool = settings.get_bool("categorize_message_by_data")?;
+    let use_old_summary_for_reward: bool = settings.get_bool("use_old_summary_for_reward")?;
+    let use_capped_event_count: bool = settings.get_bool("use_capped_event_count")?;
+    let message_event_count_cap: usize = settings.get_int("message_event_count_cap")? as usize;
+    let local_event_count_cap: usize = settings.get_int("local_event_count_cap")? as usize;
 
     // ===================================================================
     // New MMEventHistory Global State Configuration
@@ -891,17 +894,21 @@ fn read_configuration(
         categorize_message_by_data: categorize_message_by_data,
     };
 
-    let global_event_kind_mapper: MMEventKindMapper = MMEventKindMapper::from_config(&global_event_kind_config);
+    let global_event_kind_mapper: MMEventKindMapper =
+        MMEventKindMapper::from_config(&global_event_kind_config);
 
-    let global_mm_config: MMConfig = MMConfig {
-        num_nodes: num_nodes as usize,
-        split_vc_mm: global_split_vc_mm,
-        record_sender_partition: global_record_sender_partition,
-        partition_scheme: global_partition_scheme,
-        symmetry_reduction_scheme: symmetry_reduction_scheme.clone(),
-        event_kind_config: global_event_kind_config,
-        event_mapper: Arc::new(RwLock::new(global_event_kind_mapper)),
-    };
+    let global_mm_config: MMConfig = MMConfig::new(
+        num_nodes as usize,
+        global_split_vc_mm,
+        global_record_sender_partition,
+        global_partition_scheme,
+        symmetry_reduction_scheme.clone(),
+        global_event_kind_config,
+        Arc::new(RwLock::new(global_event_kind_mapper)),
+        use_capped_event_count,
+        message_event_count_cap,
+        local_event_count_cap
+    );
 
     let per_event_partition_scheme: PartitionScheme = PartitionScheme {
         num_local_event_partitions: per_event_num_local_event_partitions as usize,
@@ -916,36 +923,45 @@ fn read_configuration(
         categorize_message_by_data: categorize_message_by_data,
     };
 
-    let per_event_event_kind_mapper: MMEventKindMapper = MMEventKindMapper::from_config(&per_event_event_kind_config);
+    let per_event_event_kind_mapper: MMEventKindMapper =
+        MMEventKindMapper::from_config(&per_event_event_kind_config);
 
-    let per_event_mm_config: MMConfig = MMConfig {
-        num_nodes: num_nodes as usize,
-        split_vc_mm: per_event_split_vc_mm,
-        record_sender_partition: per_event_record_sender_partition,
-        partition_scheme: per_event_partition_scheme,
-        symmetry_reduction_scheme: symmetry_reduction_scheme,
-        event_kind_config: per_event_event_kind_config,
-        event_mapper: Arc::new(RwLock::new(per_event_event_kind_mapper)),
-    };
+    let per_event_mm_config: MMConfig = MMConfig::new(
+        num_nodes as usize,
+        per_event_split_vc_mm,
+        per_event_record_sender_partition,
+        per_event_partition_scheme,
+        symmetry_reduction_scheme,
+        per_event_event_kind_config,
+        Arc::new(RwLock::new(per_event_event_kind_mapper)),
+        use_capped_event_count,
+        message_event_count_cap,
+        local_event_count_cap,
+    );
 
     let similarity_config = SimilarityConfig {
         mm_use_absolute_similarity_threshold: mm_use_absolute_similarity_threshold,
         mm_event_history_global_similarity_threshold: mm_event_history_global_similarity_threshold,
-        mm_event_history_per_event_similarity_threshold: mm_event_history_per_event_similarity_threshold,
-        mm_event_history_global_similarity_threshold_vc: mm_event_history_global_similarity_threshold_vc,
-        mm_event_history_global_similarity_threshold_mm: mm_event_history_global_similarity_threshold_mm,
-        mm_event_history_per_event_similarity_threshold_vc: mm_event_history_per_event_similarity_threshold_vc,
-        mm_event_history_per_event_similarity_threshold_mm: mm_event_history_per_event_similarity_threshold_mm,
+        mm_event_history_per_event_similarity_threshold:
+            mm_event_history_per_event_similarity_threshold,
+        mm_event_history_global_similarity_threshold_vc:
+            mm_event_history_global_similarity_threshold_vc,
+        mm_event_history_global_similarity_threshold_mm:
+            mm_event_history_global_similarity_threshold_mm,
+        mm_event_history_per_event_similarity_threshold_vc:
+            mm_event_history_per_event_similarity_threshold_vc,
+        mm_event_history_per_event_similarity_threshold_mm:
+            mm_event_history_per_event_similarity_threshold_mm,
     };
 
-    let record_config = MMStateRecordConfig {
-        record_global_mm_state_only_on_reward_reporting: record_global_mm_state_only_on_reward_reporting,
-        global_mm_state_record_interval: global_mm_state_record_interval as usize,
-        record_per_event_mm_state: record_per_event_mm_state,
-        per_event_mm_state_record_interval_normal: per_event_mm_state_record_interval_normal as usize,
-        per_event_mm_state_record_interval_special: per_event_mm_state_record_interval_special as usize,
-        special_event_threshold: special_event_threshold as usize,
-    };
+    let record_config = MMStateRecordConfig::new(
+        record_global_mm_state_only_on_reward_reporting,
+        global_mm_state_record_interval as usize,
+        record_per_event_mm_state,
+        per_event_mm_state_record_interval_normal as usize,
+        per_event_mm_state_record_interval_special as usize,
+        special_event_threshold as usize,
+    );
 
     let reward_config = MMRewardConfig {
         reward_on_global_state_change: reward_on_global_state_change,
@@ -1000,7 +1016,6 @@ fn read_configuration(
         schedule_type,
         feedback_type,
         state_similarity_threshold,
-
 
         use_old_summary_for_reward: use_old_summary_for_reward,
         global_mm_config: Arc::new(global_mm_config),
@@ -1058,7 +1073,10 @@ fn copy_config_file_to_store(path_base: &str) {
     let config_src = "Mediator.toml";
     let config_dst = Path::new(&path_base).join("Mediator.toml");
     match std::fs::copy(config_src, config_dst) {
-        Ok(_) => log::info!("[SAVE] Copied configuration file to {}/Mediator.toml", path_base),
+        Ok(_) => log::info!(
+            "[SAVE] Copied configuration file to {}/Mediator.toml",
+            path_base
+        ),
         Err(e) => log::warn!(
             "[SAVE] Could not copy configuration file to {}/Mediator.toml: {}",
             path_base,

@@ -148,7 +148,7 @@ where
                 self.overall_cumulative.1.union(last_summary);
                 let duration = start.elapsed();
                 self.mm_event_history_perf_stat
-                    .increment_old_event_history_update_time(duration.as_millis());
+                    .increment_old_event_history_update_time(duration.as_micros());
             } else {
                 panic!(
                     "[SUMMARY] No cumulative summary for past schedule {}! Cannot update overall cumulative!",
@@ -212,7 +212,7 @@ where
         self.summary_for_event.insert(ev.clone(), T::new());
         let duration1 = start1.elapsed();
         self.mm_event_history_perf_stat
-            .increment_old_event_history_update_time(duration1.as_millis());
+            .increment_old_event_history_update_time(duration1.as_micros());
 
         let start2 = Instant::now();
         self.mm_event_history_for_event.insert(
@@ -225,7 +225,7 @@ where
         );
         let duration2 = start2.elapsed();
         self.mm_event_history_perf_stat
-            .increment_mm_event_history_update_time(duration2.as_millis());
+            .increment_mm_event_history_update_time(duration2.as_micros());
     }
 
     fn copy(&mut self, pred_ev: &LamportEvent, this_ev: &LamportEvent) {
@@ -238,7 +238,7 @@ where
         self.summary_for_event.insert(this_ev.clone(), this_summary);
         let duration1 = start1.elapsed();
         self.mm_event_history_perf_stat
-            .increment_old_event_history_update_time(duration1.as_millis());
+            .increment_old_event_history_update_time(duration1.as_micros());
 
         let start2 = Instant::now();
         let this_mm_event_history = self
@@ -250,7 +250,7 @@ where
             .insert(this_ev.clone(), this_mm_event_history);
         let duration2 = start2.elapsed();
         self.mm_event_history_perf_stat
-            .increment_mm_event_history_update_time(duration2.as_millis());
+            .increment_mm_event_history_update_time(duration2.as_micros());
     }
 
     fn take_ownership(&mut self, pred_ev: &LamportEvent, this_ev: &LamportEvent) {
@@ -279,7 +279,7 @@ where
         this_summary.update(this_ev, state_similarity_threshold);
         let duration1 = start1.elapsed();
         self.mm_event_history_perf_stat
-            .increment_old_event_history_update_time(duration1.as_millis());
+            .increment_old_event_history_update_time(duration1.as_micros());
         let new_str = format!("{}", this_summary);
 
         log::debug!(
@@ -308,7 +308,7 @@ where
 
         let duration2 = start2.elapsed();
         self.mm_event_history_perf_stat
-            .increment_mm_event_history_update_time(duration2.as_millis());
+            .increment_mm_event_history_update_time(duration2.as_micros());
     }
 
     fn merge_into(&mut self, pred_ev: &LamportEvent, this_ev: &LamportEvent) {
@@ -339,7 +339,7 @@ where
         this_summary.merge(this_ev, dep_summary, pred_ev);
         let duration1 = start1.elapsed();
         self.mm_event_history_perf_stat
-            .increment_old_event_history_update_time(duration1.as_millis());
+            .increment_old_event_history_update_time(duration1.as_micros());
 
         self.last_summarised_event.replace(this_ev.clone());
 
@@ -360,7 +360,7 @@ where
         this_history.merge(this_ev, dep_history, pred_ev);
         let duration2 = start2.elapsed();
         self.mm_event_history_perf_stat
-            .increment_mm_event_history_update_time(duration2.as_millis());
+            .increment_mm_event_history_update_time(duration2.as_micros());
     }
 
     fn contains_summary_of(&self, ev: &LamportEvent) -> bool {
@@ -428,7 +428,7 @@ where
                 .or_insert_with(T::new);
             let duration1 = start1.elapsed();
             self.mm_event_history_perf_stat
-                .increment_old_event_history_update_time(duration1.as_millis());
+                .increment_old_event_history_update_time(duration1.as_micros());
 
             // let start2 = Instant::now();
             // let schedule_cumulative_mm_event_history = self
@@ -440,7 +440,7 @@ where
             //         CFG.get().per_event_mm_config.clone(),
             //     ));
             // let duration2 = start2.elapsed();
-            // self.mm_event_history_perf_stat.increment_mm_event_history_update_time(duration2.as_millis());
+            // self.mm_event_history_perf_stat.increment_mm_event_history_update_time(duration2.as_micros());
             // HONGYI TODO: Doesn't seem necessary to get per-schedule cumulative MMEventHistory here.
 
             let latency = ClockManager::utc_now() - Utc.timestamp_nanos(task.end_ts);
@@ -485,22 +485,20 @@ where
                 );
                 let duration3 = start3.elapsed();
                 self.mm_event_history_perf_stat
-                    .increment_old_event_history_update_time(duration3.as_millis());
+                    .increment_old_event_history_update_time(duration3.as_micros());
 
                 let start4 = Instant::now();
-                self.mm_event_history_stat
+                let (_, state_id) = self.mm_event_history_stat
                     .update_state(&mm_history, true, None);
                 let reward = self.mm_event_history_stat.report_reward();
                 let duration4 = start4.elapsed();
                 self.mm_event_history_perf_stat
-                    .increment_mm_event_history_update_time(duration4.as_millis());
+                    .increment_mm_event_history_update_time(duration4.as_micros());
 
-                let mut hasher = SipHasher::new_with_keys(0, 0);
-                mm_history.hash(&mut hasher);
                 let mm_reward_entry = RewardEntry::new_with_post_state(
                     SummaryProducerIdentifier::EventHistory,
                     task.clone(),
-                    hasher.finish() as StateId,
+                    state_id,
                     reward,
                 );
                 nemesis.report_reward(if self.use_old_summary_for_reward {

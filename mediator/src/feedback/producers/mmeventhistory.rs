@@ -13,6 +13,7 @@ use crate::feedback::producers::{SimilarityConfig, SymmetryReductionScheme};
 use crate::feedback::reward::{RewardFunction, SummaryTask};
 #[cfg(feature = "selfcheck")]
 use crate::nemesis::schedules::ScheduleId;
+use crate::nemesis::schedules::StateId;
 use crate::{
     event::{LamportEvent, ProcessId},
     feedback::producers::{EventKind, MMConfig, MMRewardConfig, MMState, MMStateRecordConfig},
@@ -24,8 +25,10 @@ const MAX_NUM_TO_DISPLAY: usize = 8;
 pub struct MMEventHistoryStat {
     pub overall_total_events: usize,
     pub overall_total_message_events: usize,
+    pub overall_total_local_events: usize,
     pub overall_per_node_events: Vec<usize>,
     pub overall_per_node_message_events: Vec<usize>,
+    pub overall_per_node_local_events: Vec<usize>,
     pub overall_total_global_mm_states: usize,
     pub overall_total_per_event_mm_states: usize,
     pub overall_global_mm_states_sum: usize,
@@ -66,8 +69,10 @@ impl MMEventHistoryStat {
         MMEventHistoryStat {
             overall_total_events: 0,
             overall_total_message_events: 0,
+            overall_total_local_events: 0,
             overall_per_node_events: vec![0; global_mm_config.num_nodes],
             overall_per_node_message_events: vec![0; global_mm_config.num_nodes],
+            overall_per_node_local_events: vec![0; global_mm_config.num_nodes],
             overall_total_global_mm_states: 0,
             overall_total_per_event_mm_states: 0,
             overall_global_mm_states_sum: 0,
@@ -112,26 +117,29 @@ impl MMEventHistoryStat {
             if event.is_message_event() {
                 self.overall_total_message_events += 1;
                 self.overall_per_node_message_events[proc as usize] += 1;
+            } else if event.is_execution() {
+                self.overall_total_local_events += 1;
+                self.overall_per_node_local_events[proc as usize] += 1;
             }
 
+            let global_record_interval =
+                self.mm_state_record_config.global_mm_state_record_interval;
             if (!self
                 .mm_state_record_config
                 .record_global_mm_state_only_on_reward_reporting
-                && self.overall_total_events
-                    % self.mm_state_record_config.global_mm_state_record_interval
-                    == 0)
+                && self.overall_total_events % global_record_interval == global_record_interval - 1)
             {
                 self.update_state(&mm_event_history, true, None);
             }
 
-            let record_interval = self
+            let per_event_record_interval = self
                 .mm_state_record_config
                 .per_event_mm_state_record_interval_normal;
             if self.mm_state_record_config.record_per_event_mm_state
                 && event.is_execution()
                 && ((self.overall_total_events - self.overall_total_message_events)
-                    % record_interval
-                    == record_interval - 1)
+                    % per_event_record_interval
+                    == per_event_record_interval - 1)
             {
                 self.update_state(&mm_event_history, false, Some(&event));
             }
@@ -143,7 +151,7 @@ impl MMEventHistoryStat {
         mm_event_history: &MMEventHistory,
         is_global_state: bool,
         event_kind: Option<&EventKind>,
-    ) -> bool {
+    ) -> (bool, StateId) {
         let result = self._update_state(
             &mm_event_history.per_node_events,
             if is_global_state {
@@ -155,7 +163,7 @@ impl MMEventHistoryStat {
             event_kind,
             1,
         );
-        if result {
+        if result.0 {
             log::debug!(
                 "[MMEventHistoryStat] New distinct {} MM state recorded: {}",
                 if is_global_state {
@@ -180,7 +188,7 @@ impl MMEventHistoryStat {
         is_global_state: bool,
         event_kind: Option<&EventKind>,
         count_to_add: usize,
-    ) -> bool {
+    ) -> (bool, StateId) {
         // returns true if a new distinct state is added
 
         if is_global_state {
@@ -206,10 +214,6 @@ impl MMEventHistoryStat {
             } else {
                 Cow::Borrowed(mm_state)
             };
-
-        let mut hasher = SipHasher::new_with_keys(0, 0);
-        state_key.as_ref().hash(&mut hasher);
-        let state_hash = hasher.finish();
 
         let (store, total_distinct_count, top_hit_counts, count_since_last_reward) =
             if is_global_state {
@@ -244,13 +248,17 @@ impl MMEventHistoryStat {
         if let Some(existing_count) = store.get_mut(state_key.as_ref()) {
             *existing_count += count_to_add;
 
-            Self::insert_record(state_hash, *existing_count, top_hit_counts);
+            let mut hasher = SipHasher::new_with_keys(0, 0);
+            state_key.as_ref().hash(&mut hasher);
+            let state_hash = hasher.finish();
+
+            Self::insert_record(state_hash, existing_count.clone(), top_hit_counts);
             if is_global_state {
                 self.global_mm_states_hash_hit_count += 1;
             } else {
                 self.per_event_mm_states_hash_hit_count += 1;
             }
-            false
+            (false, state_hash as StateId)
         } else {
             let result = store.iter_mut().find(|(other_state, _)| {
                 let comparision_result = Self::states_are_similar(
@@ -280,19 +288,27 @@ impl MMEventHistoryStat {
                 comparision_result.0
             });
 
-            if let Some((_, existing_count)) = result {
+            if let Some((matched_state, existing_count)) = result {
+                let mut hasher = SipHasher::new_with_keys(0, 0);
+                matched_state.hash(&mut hasher);
+                let state_hash = hasher.finish();
+
                 *existing_count += count_to_add;
-                Self::insert_record(state_hash, *existing_count, top_hit_counts);
-                false
+                Self::insert_record(state_hash, existing_count.clone(), top_hit_counts);
+                (false, state_hash as StateId)
             } else {
+                let mut hasher = SipHasher::new_with_keys(0, 0);
+                state_key.as_ref().hash(&mut hasher);
+                let state_hash = hasher.finish();
+
                 // This is the magic:
                 // - If it was Cow::Owned, it moves the value (no cost).
                 // - If it was Cow::Borrowed, it clones it now (as desired).
-                store.insert(state_key.into_owned(), count_to_add);
+                store.insert(state_key.into_owned(), count_to_add.clone());
                 *total_distinct_count += 1;
                 *count_since_last_reward += 1;
-                Self::insert_record(state_hash, count_to_add, top_hit_counts);
-                true
+                Self::insert_record(state_hash, count_to_add.clone(), top_hit_counts);
+                (true, state_hash as StateId)
             }
         }
     }
@@ -369,7 +385,7 @@ impl MMEventHistoryStat {
                 diff_vc <= thres_vc && diff_mm <= thres_mm,
                 false,
                 diff_vc + diff_mm,
-                diff_percent as u64,
+                diff_percent,
             ); // HONGYI TODO: return both diffs?
         }
 
@@ -419,13 +435,16 @@ impl MMEventHistoryStat {
             return;
         }
 
-        let lowest_key: u64 = top_records
-            .iter()
-            .min_by_key(|&(_, &v)| v)
-            .map(|(&k, _)| k)
-            .unwrap();
         top_records.insert(hash, count);
-        top_records.remove(&lowest_key);
+
+        if top_records.len() > MAX_NUM_TO_DISPLAY {
+            let lowest_key: u64 = top_records
+                .iter()
+                .min_by_key(|&(_, &v)| v)
+                .map(|(&k, _)| k)
+                .unwrap();
+            top_records.remove(&lowest_key);
+        }
     }
 
     pub fn print(&self) {
@@ -447,8 +466,7 @@ impl MMEventHistoryStat {
         let cool_down_factor: f64 = if (self.mm_reward_config.use_cool_down_factor
             && self.mm_reward_config.cool_down_threshold > self.overall_total_global_mm_states)
         {
-            (self.overall_total_global_mm_states as f64)
-                .min(self.mm_reward_config.cool_down_threshold as f64)
+            self.mm_reward_config.cool_down_threshold as f64
                 / self.mm_reward_config.cool_down_threshold as f64 // Not to favour early rewards too much
         } else {
             1.0
@@ -492,20 +510,80 @@ impl fmt::Display for MMEventHistoryStat {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "MMEventHistory[")?;
 
+        writeln!(
+            f,
+            "overall_total_message_events / overall_total_local_events / overall_total_events: {} / {} / {}",
+            self.overall_total_message_events, (self.overall_total_events - self.overall_total_message_events), self.overall_total_events,
+        )?;
+
+        writeln!(
+            f,
+            "overall_per_node_message_events / overall_per_node_local_events / overall_per_node_events: {:?} / {:?} / {:?}",
+            self.overall_per_node_message_events, self.overall_per_node_local_events, self.overall_per_node_events,
+        )?;
+
+        let (overall_avg_message_events, overall_avg_local_events, overall_avg_events) =
+            if self.overall_total_global_mm_states > 0 {
+                (
+                    self.overall_total_message_events as f64
+                        / self.overall_total_global_mm_states as f64,
+                    self.overall_total_local_events as f64
+                        / self.overall_total_global_mm_states as f64,
+                    self.overall_total_events as f64 / self.overall_total_global_mm_states as f64,
+                )
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+
+        writeln!(f, "overall_avg_message_events / overall_avg_local_events / overall_avg_events: {:.2} / {:.2} / {:.2}",
+            overall_avg_message_events, overall_avg_local_events, overall_avg_events
+        )?;
+
+        let (
+            overall_avg_per_node_message_events,
+            overall_avg_per_node_local_events,
+            overall_avg_per_node_events,
+        ) = if self.overall_total_global_mm_states > 0 {
+            (
+                self.overall_per_node_message_events
+                    .iter()
+                    .map(|&x| (x as f64 / self.overall_total_global_mm_states as f64).round())
+                    .collect::<Vec<f64>>(),
+                self.overall_per_node_local_events
+                    .iter()
+                    .map(|&x| (x as f64 / self.overall_total_global_mm_states as f64).round())
+                    .collect::<Vec<f64>>(),
+                self.overall_per_node_events
+                    .iter()
+                    .map(|&x| (x as f64 / self.overall_total_global_mm_states as f64).round())
+                    .collect::<Vec<f64>>(),
+            )
+        } else {
+            (
+                vec![0.0; self.global_mm_config.num_nodes],
+                vec![0.0; self.global_mm_config.num_nodes],
+                vec![0.0; self.global_mm_config.num_nodes],
+            )
+        };
+
+        writeln!(
+            f,
+            "overall_avg_per_node_message_events: {:?}",
+            overall_avg_per_node_message_events
+        )?;
+        writeln!(
+            f,
+            "overall_avg_per_node_local_events: {:?}",
+            overall_avg_per_node_local_events
+        )?;
+        writeln!(
+            f,
+            "overall_avg_per_node_events: {:?}",
+            overall_avg_per_node_events
+        )?;
+
         // Global State Statistics
         writeln!(f, "GLOBAL_STATE_STATISTICS:")?;
-
-        writeln!(
-            f,
-            "overall_total_message_events / overall_total_events: {} / {}",
-            self.overall_total_message_events, self.overall_total_events,
-        )?;
-
-        writeln!(
-            f,
-            "overall_per_node_message_events / overall_per_node_events: {:?} / {:?}",
-            self.overall_per_node_message_events, self.overall_per_node_events,
-        )?;
 
         writeln!(
             f,
@@ -527,7 +605,8 @@ impl fmt::Display for MMEventHistoryStat {
         let top_global_mm_states = &self
             .top_hit_global_mm_states
             .values()
-            .collect::<Vec<&usize>>();
+            .collect::<Vec<&usize>>()
+            .sort();
         writeln!(f, "top_global_mm_states: {:?}", top_global_mm_states)?;
 
         writeln!(
@@ -592,7 +671,8 @@ impl fmt::Display for MMEventHistoryStat {
         let top_per_event_mm_states = &self
             .top_hit_per_event_mm_states
             .values()
-            .collect::<Vec<&usize>>();
+            .collect::<Vec<&usize>>()
+            .sort();
         writeln!(f, "top_per_event_mm_states: {:?}", top_per_event_mm_states)?;
 
         writeln!(
@@ -643,43 +723,43 @@ impl fmt::Display for MMEventHistoryStat {
 
 #[derive(Clone)]
 pub struct MMEventHistoryPerfStat {
-    pub mm_event_history_update_time: u128,
-    pub old_event_history_update_time: u128,
+    pub mm_event_history_update_time_micro_s: u128,
+    pub old_event_history_update_time_micro_s: u128,
 }
 
 impl MMEventHistoryPerfStat {
     pub fn new() -> Self {
         MMEventHistoryPerfStat {
-            mm_event_history_update_time: 0,
-            old_event_history_update_time: 0,
+            mm_event_history_update_time_micro_s: 0,
+            old_event_history_update_time_micro_s: 0,
         }
     }
 
     pub fn print(&self) {
         log::info!(
             "[MMEventHistoryPerfStat] mm_event_history_update_time (ms): {}",
-            self.mm_event_history_update_time
+            self.mm_event_history_update_time_micro_s / 1000
         );
         log::info!(
             "[MMEventHistoryPerfStat] old_event_history_update_time (ms): {}",
-            self.old_event_history_update_time
+            self.old_event_history_update_time_micro_s / 1000
         );
     }
 
-    pub fn increment_mm_event_history_update_time(&mut self, time_ms: u128) {
-        self.mm_event_history_update_time += time_ms;
+    pub fn increment_mm_event_history_update_time(&mut self, time_micro_s: u128) {
+        self.mm_event_history_update_time_micro_s += time_micro_s;
     }
 
-    pub fn increment_old_event_history_update_time(&mut self, time_ms: u128) {
-        self.old_event_history_update_time += time_ms;
+    pub fn increment_old_event_history_update_time(&mut self, time_micro_s: u128) {
+        self.old_event_history_update_time_micro_s += time_micro_s;
     }
 }
 
 impl Default for MMEventHistoryPerfStat {
     fn default() -> Self {
         MMEventHistoryPerfStat {
-            mm_event_history_update_time: 0,
-            old_event_history_update_time: 0,
+            mm_event_history_update_time_micro_s: 0,
+            old_event_history_update_time_micro_s: 0,
         }
     }
 }
@@ -690,12 +770,12 @@ impl fmt::Display for MMEventHistoryPerfStat {
         writeln!(
             f,
             "mm_event_history_update_time (ms): {}",
-            self.mm_event_history_update_time,
+            self.mm_event_history_update_time_micro_s / 1000,
         )?;
         writeln!(
             f,
             "old_event_history_update_time (ms): {}",
-            self.old_event_history_update_time
+            self.old_event_history_update_time_micro_s / 1000
         )?;
         writeln!(f, "END_MMEventHistoryPerfStat]")?;
         Ok(())
@@ -711,6 +791,10 @@ pub struct MMEventHistory {
     pub current_per_event_state: MMState,
 
     pub per_node_events: Vec<usize>,
+
+    pub per_node_message_events: Vec<usize>,
+
+    pub per_node_local_events: Vec<usize>,
 
     v_ts: HashMap<ProcessId, MonotonicTimestamp>,
 
@@ -734,10 +818,22 @@ impl fmt::Display for MMEventHistory {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(
             f,
-            "Current event sum: {}",
+            "Current message / local / total event sum: {} / {} / {}",
+            self.per_node_message_events.iter().sum::<usize>(),
+            self.per_node_local_events.iter().sum::<usize>(),
             self.per_node_events.iter().sum::<usize>()
         )?;
         writeln!(f, "Current per_node_events: {:?}", self.per_node_events)?;
+        writeln!(
+            f,
+            "Current per_node_message_events: {:?}",
+            self.per_node_message_events
+        )?;
+        writeln!(
+            f,
+            "Current per_node_local_events: {:?}",
+            self.per_node_local_events
+        )?;
         Ok(())
     }
 }
@@ -769,6 +865,8 @@ impl MMEventHistory {
             current_global_state: MMState::from_config(global_mm_config.clone()),
             current_per_event_state: MMState::from_config(per_event_mm_config.clone()),
             per_node_events: vec![0; global_mm_config.num_nodes],
+            per_node_message_events: vec![0; global_mm_config.num_nodes],
+            per_node_local_events: vec![0; global_mm_config.num_nodes],
             v_ts: HashMap::new(),
             mm_state_record_config: mm_state_record_config.clone(),
             #[cfg(feature = "selfcheck")]

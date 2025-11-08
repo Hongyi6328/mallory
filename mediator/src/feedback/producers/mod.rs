@@ -449,7 +449,7 @@ impl MMEventKindMapper {
         );
 
         if let Some(kind) = self.exec_map.get(event_kind) {
-            *kind
+            kind.clone()
         } else {
             if self.exec_map_choice.is_empty() {
                 for i in 0..self.exec_map_range {
@@ -457,15 +457,13 @@ impl MMEventKindMapper {
                 }
             }
 
-            // HONGYI TODO: fix non-determinism
-            // --- FIX: Use a deterministic hash ---
             let mut hasher = SipHasher::new_with_keys(0, 0);
             event_kind.hash(&mut hasher);
             let kind = (hasher.finish() as usize) % self.exec_map_range;
-            self.exec_map.insert(event_kind.clone(), kind);
+            self.exec_map.insert(event_kind.clone(), kind.clone());
             kind
-            // --- END FIX ---
 
+            // HONGYI TODO: fix non-determinism
             // let idx_to_remove = rand::random::<usize>() % self.exec_map_choice.len();
             // let choice = self.exec_map_choice.remove(idx_to_remove);
             // self.exec_map.insert(event_kind.clone(), choice);
@@ -500,6 +498,9 @@ pub struct MMConfig {
     pub symmetry_reduction_scheme: SymmetryReductionScheme,
     pub event_kind_config: EventKindConfig,
     pub event_mapper: Arc<RwLock<MMEventKindMapper>>,
+    pub use_capped_event_count: bool,
+    pub message_event_count_cap: usize,
+    pub local_event_count_cap: usize,
 }
 
 impl MMConfig {
@@ -511,15 +512,21 @@ impl MMConfig {
         symmetry_reduction_scheme: SymmetryReductionScheme,
         event_kind_config: EventKindConfig,
         event_mapper: Arc<RwLock<MMEventKindMapper>>,
+        use_capped_event_count: bool,
+        message_event_count_cap: usize,
+        local_event_count_cap: usize,
     ) -> Self {
         assert! {num_nodes > 0, "N must be greater than 0."};
         assert! {partition_scheme.num_local_event_partitions > 0, "partition_scheme.num_local_event_partitions must be greater than 0."};
         assert! {partition_scheme.num_message_events_partitions > 0, "partition_scheme.num_message_events_partitionas must be greater than 0."};
-        assert! {partition_scheme.local_event_partition_len > 0, "partition_scheme.local_event_partition_len must be greater than 0."};
-        assert! {partition_scheme.message_event_partition_len > 0, "partition_scheme.message_event_partition_len must be greater than 0."};
+        assert! {partition_scheme.num_local_event_partitions == 1 || partition_scheme.local_event_partition_len > 0, "partition_scheme.local_event_partition_len must be greater than 0."};
+        assert! {partition_scheme.num_message_events_partitions == 1 || partition_scheme.message_event_partition_len > 0, "partition_scheme.message_event_partition_len must be greater than 0."};
         assert! {split_vc_mm || !record_sender_partition, "If split_vc_mm is false, record_sender_partition must also be false."};
         assert! {split_vc_mm || (event_kind_config.num_local_event_kinds == event_kind_config.num_message_event_kinds), "If split_vc_mm is false, event_kind_config must have equal number of local event kinds and message event kind."};
         assert! {split_vc_mm || (partition_scheme.num_local_event_partitions == partition_scheme.num_message_events_partitions), "If split_vc_mm is false, partition_scheme must have equal number of local event partitions and message event partitions."};
+        assert! {split_vc_mm || !use_capped_event_count || (message_event_count_cap == local_event_count_cap), "If split_vc_mm is false and use_capped_event_count is true, message_event_count_cap must be equal to local_event_count_cap."};
+        assert! {message_event_count_cap > 0 || !use_capped_event_count, "If use_capped_event_count is true, message_event_count_cap must be greater than 0."};
+        assert! {local_event_count_cap > 0 || !use_capped_event_count, "If use_capped_event_count is true, local_event_count_cap must be greater than 0."};
         // assert! {event_kind_config.num_local_event_kinds > 0 || !split_vc_mm, "If split_vc_mm is true, event_kind_config must have at least one local event kind."};
         // assert! {event_kind_config.num_message_event_kinds > 0, "event_kind_config must have at least one message event kind."};
 
@@ -531,6 +538,9 @@ impl MMConfig {
             symmetry_reduction_scheme,
             event_kind_config,
             event_mapper,
+            use_capped_event_count,
+            message_event_count_cap,
+            local_event_count_cap,
         }
     }
 }
@@ -622,7 +632,7 @@ impl MMState {
                         num_nodes,
                         num_nodes,
                         event_kind_config.num_message_event_kinds,
-                        partition_scheme.num_message_events_partitions,
+                        partition_scheme.num_message_events_partitions, // NOTE: receiver partition
                     )
                         .f(),
                 )
@@ -680,6 +690,8 @@ impl MMState {
         // returns true if the MM state is updated
         let proc = event.proc() as usize;
         if let Some(ev_kind) = EventKind::from_event(event) {
+            let ptr_to_add: &mut usize;
+
             if ev_kind.is_execution() {
                 if self.config.event_kind_config.num_local_event_kinds == 0 {
                     return false;
@@ -692,19 +704,14 @@ impl MMState {
                     .get_exec_kind(&ev_kind);
                 let partition_id = self.get_partition_id(local_logical_clock, true);
                 if self.config.split_vc_mm {
-                    self.vc[[proc, mapped_kind, partition_id]] += 1;
-                    self.vc_sum += 1;
+                    ptr_to_add = &mut self.vc[[proc, mapped_kind, partition_id]];
                 } else {
                     if self.config.record_sender_partition {
-                        self.mm[[proc, proc, mapped_kind, partition_id, 0]] += 1;
-                        self.mm_sum += 1;
-                    // HONGYI TODO: do it more elegantly
+                        ptr_to_add = &mut self.mm[[proc, proc, mapped_kind, partition_id, 0]];
                     } else {
-                        self.mm[[proc, proc, mapped_kind, partition_id]] += 1;
-                        self.mm_sum += 1;
+                        ptr_to_add = &mut self.mm[[proc, proc, mapped_kind, partition_id]];
                     }
                 }
-                true
             } else if ev_kind.is_message_event() {
                 if self.config.event_kind_config.num_message_event_kinds == 0 {
                     return false;
@@ -725,25 +732,50 @@ impl MMState {
                         // } else {
                         //     self.mm[[proc, to_proc, kind, partition_id]] += 1; // HONGYI TODO: get the real sender partition id and set up a receive matrix instead
                         // }
-                        false
+                        return false;
                     }
                     EventKind::PacketReceive { from, .. } => {
                         let from_proc = from as usize;
                         if self.config.record_sender_partition {
                             let from_partition_id =
                                 self.get_partition_id(local_logical_clock, false); // HONGYI TODO: get the real sender partition id
-                            self.mm[[from_proc, proc, kind, from_partition_id, partition_id]] += 1;
-                            self.mm_sum += 1;
+                            ptr_to_add = &mut self.mm
+                                [[from_proc, proc, kind, partition_id, from_partition_id]];
                         } else {
-                            self.mm[[from_proc, proc, kind, partition_id]] += 1;
-                            self.mm_sum += 1;
+                            ptr_to_add = &mut self.mm[[from_proc, proc, kind, partition_id]];
                         }
-                        true
                     }
-                    _ => false,
+                    _ => return false,
                 }
             } else {
-                false
+                return false;
+            }
+
+            if self.config.use_capped_event_count {
+                let event_count_cap = if ev_kind.is_execution() {
+                    self.config.local_event_count_cap
+                } else {
+                    self.config.message_event_count_cap
+                };
+                if *ptr_to_add == event_count_cap {
+                    false
+                } else {
+                    *ptr_to_add += 1;
+                    if ev_kind.is_execution() && self.config.split_vc_mm {
+                        self.vc_sum += 1;
+                    } else {
+                        self.mm_sum += 1;
+                    }
+                    true
+                }
+            } else {
+                *ptr_to_add += 1;
+                if ev_kind.is_execution() && self.config.split_vc_mm {
+                    self.vc_sum += 1;
+                } else {
+                    self.mm_sum += 1;
+                }
+                true
             }
         } else {
             false
@@ -763,7 +795,7 @@ impl MMState {
         let mut permutation: Vec<usize> = (0..num_events.len()).collect();
         permutation.sort_unstable_by_key(|&i| num_events[i]);
 
-        let sorted_vc = if self.config.split_vc_mm {
+        let sorted_vc = if self.config.split_vc_mm && self.config.event_kind_config.num_local_event_kinds > 0 {
             self.vc.select(Axis(0), &permutation) // Sorts along Axis 0 (rows)
         } else {
             self.vc.clone()
@@ -837,12 +869,7 @@ impl MMState {
         self.mm_sum = self.mm.sum();
     }
 
-    pub fn merge(&mut self, other: &MMState) {
-        assert!(
-            self.has_same_config(other),
-            "Cannot merge MMStates with different configurations."
-        );
-
+    fn _merge_no_cap(&mut self, other: &MMState) {
         if self.config.split_vc_mm {
             Zip::from(&mut self.vc)
                 .and(&other.vc)
@@ -855,6 +882,37 @@ impl MMState {
             .for_each(|elem_a, elem_b| {
                 *elem_a = std::cmp::max(*elem_a, *elem_b);
             });
+    }
+
+    fn _merge_with_cap(&mut self, other: &MMState) {
+        if self.config.split_vc_mm {
+            Zip::from(&mut self.vc)
+                .and(&other.vc)
+                .for_each(|elem_a, elem_b| {
+                    *elem_a =
+                        std::cmp::min(std::cmp::max(*elem_a, *elem_b), self.config.local_event_count_cap);
+                });
+        }
+        Zip::from(&mut self.mm)
+            .and(&other.mm)
+            .for_each(|elem_a, elem_b| {
+                *elem_a =
+                    std::cmp::min(std::cmp::max(*elem_a, *elem_b), self.config.message_event_count_cap);
+            });
+    }
+
+    pub fn merge(&mut self, other: &MMState) {
+        assert!(
+            self.has_same_config(other),
+            "Cannot merge MMStates with different configurations."
+        );
+
+        if self.config.use_capped_event_count {
+            self._merge_with_cap(other);
+        } else {
+            self._merge_no_cap(other);
+        }
+
         self.recalc_sums();
         self.has_changed.set(true);
     }

@@ -35,30 +35,33 @@ num_nodes = 7
 symmetry_reduction_scheme = "None"  # Options: "None", "Sort", "Merge"
                                     # "Merge" is not implemented yet
 categorize_message_by_data = true
-use_old_summary_for_reward = false
+use_old_summary_for_reward = true
+use_capped_event_count = true
+local_event_count_cap = 3
+message_event_count_cap = 2
 
 # ===================================================================
 # New MMEventHistory Global State Configuration
 # ===================================================================
 # [mmeventhistory_global]
-global_split_vc_mm = false
+global_split_vc_mm = true
 global_record_sender_partition = false
 
 # [mmeventhistory_global.partition_scheme]
 global_num_local_event_partitions = 1
-global_local_event_partition_len = 100
+global_local_event_partition_len = 1
 global_num_message_events_partitions = 1
-global_message_event_partition_len = 100
+global_message_event_partition_len = 1
 
 # [mmeventhistory_global.event_kind_config]
-global_num_local_event_kinds = 1
-global_num_message_event_kinds = 1
+global_num_local_event_kinds = 128
+global_num_message_event_kinds = 128
 
 # ===================================================================
 # New MMEventHistory Per-Event State Configuration
 # ===================================================================
 # [mmeventhistory_per_event]
-per_event_split_vc_mm = false
+per_event_split_vc_mm = true
 per_event_record_sender_partition = false
 
 # [mmeventhistory_per_event.partition_scheme]
@@ -68,8 +71,8 @@ per_event_num_message_events_partitions = 1
 per_event_message_event_partition_len = 1
 
 # [mmeventhistory_per_event.event_kind_config]
-per_event_num_local_event_kinds = 1
-per_event_num_message_event_kinds = 1
+per_event_num_local_event_kinds = 128
+per_event_num_message_event_kinds = 128
 
 # ===================================================================
 # New Similarity, Record, and Reward Configurations
@@ -89,13 +92,13 @@ mm_event_history_per_event_similarity_threshold_mm = 0.3
 # [record_config]
 record_global_mm_state_only_on_reward_reporting = true
 global_mm_state_record_interval = 100
-record_per_event_mm_state = true
-per_event_mm_state_record_interval_normal = 10
+record_per_event_mm_state = false
+per_event_mm_state_record_interval_normal = 50
 per_event_mm_state_record_interval_special = 100 # Not used yet
 special_event_threshold = 20 # Not used yet
 
 # [reward_config]
 reward_on_global_state_change = 1.0
-reward_on_per_event_state_change = 0.8
+reward_on_per_event_state_change = 0.1
 use_cool_down_factor = true
-cool_down_threshold = 40
+cool_down_threshold = 100
